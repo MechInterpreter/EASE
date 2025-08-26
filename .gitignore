@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dylib
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.mypy_cache/
+
+# Node / Vite
+node_modules/
+dist/
+build/
+.vite/
+.eslintcache
+*.log
+
+# Tailwind / PostCSS
+.postcss-cache/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Project artifacts
+artifacts/
+outputs/
+**/*.pt
+**/*.ckpt
+**/*.npz
+
+data/*.npz
+
+datasets/*.npz
+
+# Cache
+.cache/
+__cache__/
+
+# Misc
+*.local
+*.lock
