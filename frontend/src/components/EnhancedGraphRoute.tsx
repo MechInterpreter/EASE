@@ -12,6 +12,8 @@ import ExportUtils, { ErrorToast, SuccessToast } from './ExportUtils'
 import type { GraphNode } from '../lib/graph-types'
 import type { NeuronpediaJSON } from '../lib/neuronpedia-parser'
 import { parseNeuronpediaJSON } from '../lib/neuronpedia-parser'
+import { labelResolver } from '../services/labels/labelResolver'
+import type { LabelMode } from '../services/labels/autoInterp'
 
 // Sample data for testing (will be replaced with actual charlotte data)
 const charlotteData = {
@@ -58,6 +60,7 @@ export default function EnhancedGraphRoute() {
   const [edgeOpacityThreshold, setEdgeOpacityThreshold] = useState(0.1)
   const [showLabels, setShowLabels] = useState(true)
   const [neighborsN, setNeighborsN] = useState(2)
+  const [labelMode, setLabelMode] = useState<LabelMode>('autointerp')
   
   // Interactive state
   const [searchQuery, setSearchQuery] = useState('')
@@ -92,38 +95,87 @@ export default function EnhancedGraphRoute() {
   const parsedData = parseNeuronpediaJSON(charlotteData as NeuronpediaJSON)
   
   // Create proper GraphNode format from parsed data
+  // Preserve fields like featureId, ctx_idx, clerp/ppClerp for label resolution and search
   const graphNodes: GraphNode[] = parsedData.nodes.map(node => ({
-    id: node.id,
-    label: node.label,
-    layer: node.layer,
-    feature_type: node.feature_type,
-    size: 1,
-    nodeColor: '#6b7280',
-    pos: [Math.random() * 800, Math.random() * 600],
-    x: Math.random() * 800,
-    y: Math.random() * 600,
-    activation: node.activation,
-    influence: node.influence,
-    tokenProb: node.tokenProb,
-    isTargetLogit: node.isTargetLogit,
-    runIdx: node.runIdx,
-    reverseCtxIdx: node.reverseCtxIdx
+    ...node
   }))
+
+  // Preload labels for top nodes when component mounts or labelMode changes
+  useEffect(() => {
+    labelResolver.preloadTopNodeLabels(graphNodes, labelMode, 20)
+  }, [graphNodes, labelMode])
+
+  // Generate meaningful groups from sample data showing actual feature concepts
+  const groups = React.useMemo(() => {
+    // Group by semantic similarity (in real app, this would come from clustering algorithm)
+    const semanticGroups = [
+      {
+        id: 'financial_analysis',
+        name: 'Financial Analysis',
+        members: graphNodes.filter(node => 
+          node.clerp?.toLowerCase().includes('money') || 
+          node.clerp?.toLowerCase().includes('analysis')
+        )
+      },
+      {
+        id: 'metadata_processing', 
+        name: 'Metadata Processing',
+        members: graphNodes.filter(node => 
+          node.clerp?.toLowerCase().includes('metadata') ||
+          node.clerp?.toLowerCase().includes('associative')
+        )
+      },
+      {
+        id: 'attention_mechanisms',
+        name: 'Attention Mechanisms', 
+        members: graphNodes.filter(node => 
+          node.feature_type === 'attention' ||
+          node.clerp?.toLowerCase().includes('attention')
+        )
+      },
+      {
+        id: 'output_logits',
+        name: 'Output Generation',
+        members: graphNodes.filter(node => 
+          node.feature_type === 'logit' ||
+          node.clerp?.toLowerCase().includes('output')
+        )
+      }
+    ].filter(group => group.members.length > 0)
+    
+    // Add remaining ungrouped nodes as individual groups
+    const groupedNodeIds = new Set(semanticGroups.flatMap(g => g.members.map(m => m.id)))
+    const ungroupedNodes = graphNodes.filter(node => !groupedNodeIds.has(node.id))
+    
+    ungroupedNodes.forEach(node => {
+      semanticGroups.push({
+        id: `individual_${node.id}`,
+        name: node.clerp || node.ppClerp || `Feature ${node.id}`,
+        members: [node]
+      })
+    })
+    
+    return semanticGroups.map(group => ({
+      id: group.id,
+      name: group.name,
+      members: group.members,
+      size: group.members.length
+    }))
+  }, [graphNodes])
 
   // Sample supernode data for cluster view
   const supernodeData = {
-    nodes: [
-      { id: 'supernode-1', size: 15, layer: 0, members: ['n1', 'n2', 'n3'] },
-      { id: 'supernode-2', size: 8, layer: 1, members: ['n4', 'n5'] },
-      { id: 'supernode-3', size: 12, layer: 1, members: ['n6', 'n7', 'n8'] },
-      { id: 'supernode-4', size: 6, layer: 2, members: ['n9'] }
-    ],
+    nodes: groups.map(group => ({
+      id: group.id,
+      size: group.size,
+      layer: group.members[0]?.layer || 0,
+      members: group.members.map(m => m.id)
+    })),
     edges: [
-      { source: 'supernode-1', target: 'supernode-2', weight: 0.7 },
-      { source: 'supernode-1', target: 'supernode-3', weight: -0.2 },
-      { source: 'supernode-2', target: 'supernode-4', weight: 0.5 },
-      { source: 'supernode-3', target: 'supernode-4', weight: 0.3 }
-    ]
+      { source: groups[0]?.id || 'financial_analysis', target: groups[2]?.id || 'attention_mechanisms', weight: 0.7 },
+      { source: groups[1]?.id || 'metadata_processing', target: groups[2]?.id || 'attention_mechanisms', weight: 0.4 },
+      { source: groups[2]?.id || 'attention_mechanisms', target: groups[3]?.id || 'output_logits', weight: 0.8 }
+    ].filter(edge => edge.source && edge.target)
   }
 
   // Analysis handlers
@@ -183,13 +235,13 @@ export default function EnhancedGraphRoute() {
 
   // Visualization handlers
   const handleResetVisualization = useCallback(() => {
-    setLayout('layered')
-    setEdgeOpacityThreshold(0.1)
-    setShowLabels(true)
-    setNeighborsN(2)
+    setSelectedNodes([])
     setPinnedNodes([])
+    setHoveredNode(null)
+    setClickedNode(null)
+    setHighlightedPath([])
     setIsolatedNodes([])
-    setLassoMode(false)
+    setSearchQuery('')
   }, [])
 
   const handleFitToView = useCallback(() => {
@@ -219,6 +271,18 @@ export default function EnhancedGraphRoute() {
     setLabelOverrides(labels)
     console.log('Imported labels:', Object.keys(labels).length)
   }, [])
+
+  // Handle label mode change
+  const handleLabelModeChange = useCallback((mode: LabelMode) => {
+    setLabelMode(mode)
+    // Preload labels for top nodes when switching to autointerp mode
+    if (mode === 'autointerp' && graphNodes.length > 0) {
+      // Batch resolve labels for top nodes
+      graphNodes.slice(0, 50).forEach(node => {
+        labelResolver.resolveLabel(node, { mode, useCache: true }).catch(console.error)
+      })
+    }
+  }, [graphNodes])
 
   const handleNeighborhoodIsolate = useCallback((node: GraphNode, hops: number) => {
     console.log(`Isolating ${hops}-hop neighborhood of ${node.id}`)
@@ -308,43 +372,67 @@ export default function EnhancedGraphRoute() {
             onEdgeOpacityChange={setEdgeOpacityThreshold}
             onLabelsToggle={setShowLabels}
             onNeighborsChange={setNeighborsN}
-            onDarkModeToggle={setDarkMode}
-            onReset={handleResetVisualization}
-            onFitToView={handleFitToView}
           />
 
           {/* Interactive Controls */}
           <InteractiveControls
-            nodes={[]} // Will be populated from active view
-            onSearch={handleSearch}
-            onLassoSelect={handleLassoSelect}
-            onPinNodes={handlePinNodes}
-            onExportLabels={handleExportLabels}
-            onImportLabels={handleImportLabels}
+            nodes={graphNodes}
+            edges={parsedData.links.map(link => ({
+              source: typeof link.source === 'string' ? link.source : link.source.id,
+              target: typeof link.target === 'string' ? link.target : link.target.id,
+              weight: link.weight || 0
+            }))}
+            groups={groups}
+            onSearch={(query, results) => {
+              console.log('Search:', query, results.length, 'results')
+            }}
+            onLassoSelect={(nodes) => {
+              setSelectedNodes(nodes.map(n => n.id))
+            }}
+            onPinNodes={(nodeIds) => {
+              setPinnedNodes(prev => [...new Set([...prev, ...nodeIds])])
+            }}
+            onGroupClick={(groupId) => {
+              console.log('Group clicked:', groupId)
+              const group = groups.find(g => g.id === groupId)
+              if (group) {
+                setSelectedNodes(group.members.map(m => m.id))
+                setSuccessMessage(`Selected ${group.members.length} features from "${group.name}" group`)
+              }
+            }}
+            onEdgeClick={(source, target) => {
+              console.log('Edge clicked:', source, '->', target)
+              setHighlightedPath([source, target])
+              setSuccessMessage(`Highlighted connection: ${source} → ${target}`)
+            }}
+            onExportLabels={() => {
+              const labels = labelResolver.exportLabels()
+              const blob = new Blob([JSON.stringify(labels, null, 2)], { type: 'application/json' })
+              const url = URL.createObjectURL(blob)
+              const a = document.createElement('a')
+              a.href = url
+              a.download = 'labels.json'
+              a.click()
+              URL.revokeObjectURL(url)
+              setSuccessMessage('Labels exported successfully')
+            }}
+            onImportLabels={(labels) => {
+              const nodeLabels = Object.fromEntries(
+                Object.entries(labels).map(([key, value]) => [
+                  key,
+                  { text: value, source: 'imported' as const, confidence: 1.0 }
+                ])
+              )
+              labelResolver.importLabels(nodeLabels)
+              setSuccessMessage('Labels imported successfully')
+            }}
+            onLabelModeChange={setLabelMode}
+            labelMode={labelMode}
             darkMode={darkMode}
           />
 
-          {/* Timeline Controls */}
-          <div className={`p-4 border-b ${
-            darkMode ? 'border-gray-600' : 'border-gray-200'
-          }`}>
-            <TimelineControls
-              totalSteps={totalSteps}
-              currentStep={currentStep}
-              isPlaying={isPlaying}
-              speed={playbackSpeed}
-              onStepChange={handleStepChange}
-              onPlayPause={handlePlayPause}
-              onSpeedChange={handleSpeedChange}
-              onStepForward={handleStepForward}
-              onStepBackward={handleStepBackward}
-              onJumpSteps={handleJumpSteps}
-              darkMode={darkMode}
-            />
-          </div>
-
           {/* Export Utils */}
-          <div className={`p-4 border-b ${
+          <div className={`border-b ${
             darkMode ? 'border-gray-600' : 'border-gray-200'
           }`}>
             <ExportUtils
@@ -369,7 +457,7 @@ export default function EnhancedGraphRoute() {
           </div>
 
           {/* Performance Settings */}
-          <div className="p-4">
+          <div>
             <h3 className={`text-sm font-semibold mb-3 ${
               darkMode ? 'text-white' : 'text-gray-900'
             }`}>
@@ -434,12 +522,12 @@ export default function EnhancedGraphRoute() {
           {viewMode === 'attribution' ? (
             <AttributionRailView
               data={charlotteData as NeuronpediaJSON}
-              nodes={graphNodes}
-              onHover={(node: any) => setHoveredNode(node?.id || null)}
+              onNodeHover={(node: any) => setHoveredNode(node?.id || null)}
               onNodeClick={(node: any) => setClickedNode(node?.id || null)}
               onPathHighlight={(path: any) => setHighlightedPath(path || [])}
               edgeOpacityThreshold={edgeOpacityThreshold}
               showLabels={showLabels}
+              labelMode={labelMode}
               darkMode={darkMode}
             />
           ) : (
@@ -485,8 +573,8 @@ export default function EnhancedGraphRoute() {
         </div>
       </div>
       
-      {/* Performance Optimizer (hidden canvas for optimized rendering) */}
-      <div className="absolute inset-0 pointer-events-none">
+      {/* Performance Optimizer (hidden, non-overlapping) */}
+      <div className="hidden">
         <PerformanceOptimizer
           nodes={graphNodes}
           links={parsedData.links}
