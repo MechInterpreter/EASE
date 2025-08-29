@@ -110,5 +110,10 @@ Key files:
 - Data path: set `EASE_DATA_PATH` to point to a Neuronpedia-style JSON graph if not using the default Charlotte file.
 - Ports: frontend dev server runs on 5173, backend on 8000. Make sure both are running locally.
 
-## License
-For internal development; add a license here if distributing.
+## Development
+
+This is an active research project. The codebase is under active development and the API may change.
+
+## Contributing
+
+Contributions are welcome! Please open an issue to discuss potential changes before submitting a pull request.
