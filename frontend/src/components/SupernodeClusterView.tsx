@@ -1,11 +1,49 @@
 // Supernode Cluster View - Force layout with expand/collapse and member inspection
-import React, { useEffect, useRef, useState, useCallback } from 'react'
-import d3 from '../lib/d3-jetpack'
-import type { GraphNode, GraphLink, ForceNode } from '../lib/graph-types'
-import { forceContainer, drawLinks } from '../lib/graph-utils'
+import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react'
+import * as d3 from 'd3'
+import { Selection, BaseType, SimulationNodeDatum, SimulationLinkDatum } from 'd3'
+import type { GraphNode, GraphLink } from '../lib/graph-types'
+
+type SupernodeData = GraphNode & {
+  members?: GraphNode[]
+  expanded?: boolean
+  x?: number
+  y?: number
+  vx?: number
+  vy?: number
+  fx?: number | null
+  fy?: number | null
+}
+
+type ForceNode = SupernodeData & SimulationNodeDatum
+type ForceLink = SimulationLinkDatum<ForceNode> & { weight?: number; value?: number }
+
+// Color palette for different layers
+const getLayerColor = (layer: number): string => {
+  const colors = [
+    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
+    '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E9'
+  ]
+  return colors[layer % colors.length]
+}
+
+// Deterministic hash → [0,1) for stable seeded placement
+const hashToUnit = (s: string): number => {
+  let h = 2166136261 >>> 0; // FNV-1a
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 4294967296;
+}
 
 interface SupernodeClusterViewProps {
-  data: any // Supernode data
+  data: {
+    nodes: any[]
+    links?: any[]
+    edges?: any[]
+    allNodes?: Array<{ id: string; layer: number } | string>
+  }
   onNodeHover?: (node: GraphNode | null) => void
   onNodeClick?: (node: GraphNode | null) => void
   onNeighborhoodIsolate?: (node: GraphNode, hops: number) => void
@@ -13,427 +51,511 @@ interface SupernodeClusterViewProps {
   neighborsN?: number
   showLabels?: boolean
   darkMode?: boolean
+  layout?: 'force' | 'layered'
+  onNodeDoubleClick?: (nodeId: string) => void
+  onEdgeClick?: (source: string, target: string) => void
+  selectedNodes?: string[]
+  pinnedNodes?: string[]
+  highlightedPath?: string[]
+  isolatedNodes?: string[]
+  setIsolatedNeighborhood?: (nodes: Set<string>) => void
+  isReconstructing?: boolean
 }
 
-interface SupernodeData {
-  id: string
-  size: number
-  layer: number
-  members: string[]
-  expanded: boolean
-  x?: number
-  y?: number
-  fx?: number | null
-  fy?: number | null
-  pinned?: boolean
-}
-
-const CLUSTER_CONFIG = {
-  nodeMinRadius: 8,
-  nodeMaxRadius: 40,
-  memberRadius: 4,
-  expandedSpacing: 60,
-  margin: { top: 40, right: 40, bottom: 40, left: 40 }
-}
-
-export default function SupernodeClusterView({
+function SupernodeClusterView({
   data,
   onNodeHover,
   onNodeClick,
   onNeighborhoodIsolate,
   edgeOpacityThreshold = 0.1,
-  neighborsN = 2,
+  neighborsN = 5,
   showLabels = true,
-  darkMode = false
+  darkMode = false,
+  layout = 'force',
+  onNodeDoubleClick,
+  onEdgeClick,
+  selectedNodes = [],
+  pinnedNodes: pinnedNodesProp = [],
+  highlightedPath,
+  isolatedNodes,
+  setIsolatedNeighborhood,
+  isReconstructing = false
 }: SupernodeClusterViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const simulationRef = useRef<d3.Simulation<ForceNode, undefined> | null>(null)
-  
-  const [supernodes, setSupernodes] = useState<SupernodeData[]>([])
+  const tickCountRef = useRef(0)
+  const positionCacheRef = useRef(new Map<string, { x: number; y: number }>())
+  const nodeSelectionRef = useRef<d3.Selection<SVGGElement, ForceNode, SVGSVGElement, unknown> | null>(null)
+  const onNodeHoverRef = useRef<typeof onNodeHover>(onNodeHover)
+  const onNodeClickRef = useRef<typeof onNodeClick>(onNodeClick)
+  const onNeighborhoodIsolateRef = useRef<typeof onNeighborhoodIsolate>(onNeighborhoodIsolate)
+  const neighborsNRef = useRef<number>(neighborsN)
+  const pinnedNodesRef = useRef<Set<string>>(new Set())
+
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null)
   const [clickedNode, setClickedNode] = useState<GraphNode | null>(null)
   const [pinnedNodes, setPinnedNodes] = useState<Set<string>>(new Set())
-  const [isolatedNeighborhood, setIsolatedNeighborhood] = useState<Set<string>>(new Set())
+  const [isolatedNeighborhood, setIsolatedNeighborhoodState] = useState<Set<string>>(new Set())
   const [tooltip, setTooltip] = useState<{ x: number; y: number; content: string } | null>(null)
 
-  // Parse supernode data
-  const { nodes, links } = React.useMemo(() => {
-    if (!data?.nodes) return { nodes: [], links: [] }
+  // Sync external pinnedNodes prop to internal state
+  useEffect(() => {
+    if (pinnedNodesProp && Array.isArray(pinnedNodesProp)) {
+      setPinnedNodes(new Set(pinnedNodesProp))
+    }
+  }, [pinnedNodesProp])
 
-    const nodes: GraphNode[] = data.nodes.map((sn: any, i: number) => ({
-      id: sn.id,
-      label: sn.id,
-      layer: sn.layer || 0,
-      size: sn.size,
-      members: sn.members || [],
-      isSuperNode: true,
-      expanded: false,
-      pinned: false,
-      nodeColor: getLayerColor(sn.layer || 0),
-      sourceLinks: [],
-      targetLinks: [],
-      x: Math.random() * 400,
-      y: Math.random() * 400
-    }))
+  // Keep refs in sync (avoid re-creating handlers/effects)
+  useEffect(() => { onNodeHoverRef.current = onNodeHover }, [onNodeHover])
+  useEffect(() => { onNodeClickRef.current = onNodeClick }, [onNodeClick])
+  useEffect(() => { onNeighborhoodIsolateRef.current = onNeighborhoodIsolate }, [onNeighborhoodIsolate])
+  useEffect(() => { neighborsNRef.current = neighborsN }, [neighborsN])
+  useEffect(() => { pinnedNodesRef.current = pinnedNodes }, [pinnedNodes])
 
-    const nodeMap = new Map(nodes.map(n => [n.id, n]))
-    const links: GraphLink[] = (data.edges || []).map((edge: any) => {
-      const sourceNode = nodeMap.get(edge.source)
-      const targetNode = nodeMap.get(edge.target)
-      
-      if (!sourceNode || !targetNode) return null
+  // Sync external isolatedNodes prop to internal state
+  useEffect(() => {
+    if (isolatedNodes && Array.isArray(isolatedNodes) && isolatedNodes.length > 0) {
+      setIsolatedNeighborhoodState(new Set(isolatedNodes))
+    } else if (isolatedNodes && isolatedNodes.length === 0) {
+      setIsolatedNeighborhoodState(new Set())
+    }
+  }, [isolatedNodes])
 
-      const link: GraphLink = {
-        source: edge.source,
-        target: edge.target,
-        sourceNode,
-        targetNode,
-        weight: edge.weight,
-        absWeight: Math.abs(edge.weight),
-        color: getWeightColor(edge.weight),
-        strokeWidth: Math.max(1, Math.abs(edge.weight) * 5)
-      }
+  // Parse supernode data - only show actual supernodes (nodes with multiple members)
+  const nodes = React.useMemo(() => {
+    if (!data?.nodes) return []
 
-      sourceNode.targetLinks?.push(link)
-      targetNode.sourceLinks?.push(link)
-      
-      return link
-    }).filter(Boolean)
-
-    return { nodes, links }
+    return data.nodes
+      .filter((sn: any) => sn.members && sn.members.length > 1)
+      .map((sn: any) => ({
+        id: sn.id,
+        label: sn.id,
+        layer: sn.layer || 0,
+        size: sn.size,
+        members: sn.members || [],
+        isSuperNode: true,
+        expanded: false,
+        pinned: false,
+        nodeColor: getLayerColor(sn.layer || 0),
+        sourceLinks: [],
+        targetLinks: [],
+        x: positionCacheRef.current.get(sn.id)?.x,
+        y: positionCacheRef.current.get(sn.id)?.y
+      })) as GraphNode[]
   }, [data])
 
-  // Filter links and nodes based on isolation
-  const { visibleNodes, visibleLinks } = React.useMemo(() => {
-    let visibleNodes = nodes
-    let visibleLinks = links.filter(link => Math.abs(link.weight) >= edgeOpacityThreshold)
-
-    if (isolatedNeighborhood.size > 0) {
-      visibleNodes = nodes.filter(node => isolatedNeighborhood.has(node.id))
-      visibleLinks = visibleLinks.filter(link => 
-        isolatedNeighborhood.has(link.source as string) && 
-        isolatedNeighborhood.has(link.target as string)
-      )
-    }
-
-    return { visibleNodes, visibleLinks }
-  }, [nodes, links, edgeOpacityThreshold, isolatedNeighborhood])
-
-  // Setup canvas
-  const setupCanvas = useCallback(() => {
-    if (!canvasRef.current || !containerRef.current) return
-
-    const canvas = canvasRef.current
-    const rect = containerRef.current.getBoundingClientRect()
-    const dpr = window.devicePixelRatio || 1
-
-    canvas.width = rect.width * dpr
-    canvas.height = rect.height * dpr
-    canvas.style.width = `${rect.width}px`
-    canvas.style.height = `${rect.height}px`
-
-    const ctx = canvas.getContext('2d')
-    if (ctx) {
-      ctx.scale(dpr, dpr)
-    }
-  }, [])
-
-  // Draw edges
-  const drawEdges = useCallback(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const rect = canvas.getBoundingClientRect()
-    ctx.clearRect(0, 0, rect.width, rect.height)
-
-    drawLinks(ctx, visibleLinks, {
-      width: rect.width,
-      height: rect.height,
-      margin: CLUSTER_CONFIG.margin,
-      nodeWidth: 0,
-      nodeHeight: 0,
-      edgeOpacityThreshold,
-      layout: 'force'
-    }, { opacity: 0.6 })
-  }, [visibleLinks, edgeOpacityThreshold])
-
-  // Expand/collapse supernode
-  const toggleExpansion = useCallback((nodeId: string) => {
-    setSupernodes(prev => prev.map(sn => 
-      sn.id === nodeId ? { ...sn, expanded: !sn.expanded } : sn
-    ))
-  }, [])
-
-  // Pin/unpin node
-  const togglePin = useCallback((nodeId: string) => {
-    setPinnedNodes(prev => {
-      const newSet = new Set(prev)
-      if (newSet.has(nodeId)) {
-        newSet.delete(nodeId)
-      } else {
-        newSet.add(nodeId)
-      }
-      return newSet
-    })
-  }, [])
-
-  // Isolate neighborhood
-  const isolateNeighborhood = useCallback((centerNode: GraphNode, hops: number) => {
-    const neighborhood = new Set<string>([centerNode.id])
-    const queue = [{ node: centerNode, depth: 0 }]
-    const visited = new Set<string>([centerNode.id])
-
-    while (queue.length > 0) {
-      const { node, depth } = queue.shift()!
-      
-      if (depth >= hops) continue
-
-      // Add connected nodes
-      const connectedLinks = [...(node.sourceLinks || []), ...(node.targetLinks || [])]
-      for (const link of connectedLinks) {
-        const connectedNode = link.sourceNode === node ? link.targetNode : link.sourceNode
-        if (connectedNode && !visited.has(connectedNode.id)) {
-          visited.add(connectedNode.id)
-          neighborhood.add(connectedNode.id)
-          queue.push({ node: connectedNode, depth: depth + 1 })
+  // Convert links/edges to use node objects instead of IDs for D3 force layout
+  const links = React.useMemo(() => {
+    const rawLinks = (data?.links ?? data?.edges ?? []) as Array<any>;
+    if (!rawLinks.length || !nodes.length) return [];
+    
+    return rawLinks
+      .map((link: any) => {
+        const sourceId = typeof link.source === 'string' ? link.source : link.source?.id;
+        const targetId = typeof link.target === 'string' ? link.target : link.target?.id;
+        
+        const sourceNode = nodes.find(n => n.id === sourceId);
+        const targetNode = nodes.find(n => n.id === targetId);
+        
+        if (!sourceNode || !targetNode) {
+          return null;
         }
-      }
-    }
+        
+        return {
+          source: sourceNode,
+          target: targetNode,
+          weight: link.weight || 1,
+          value: link.value || link.weight || 1
+        };
+      })
+      .filter(Boolean) as ForceLink[];
+  }, [nodes, data?.links, data?.edges]);
 
-    setIsolatedNeighborhood(neighborhood)
-    onNeighborhoodIsolate?.(centerNode, hops)
-  }, [onNeighborhoodIsolate])
+  // Compute visible nodes and links based on isolation
+  const { visibleNodes, visibleLinks } = useMemo(() => {
+    if (isolatedNeighborhood.size === 0) {
+      return { visibleNodes: nodes, visibleLinks: links };
+    }
+    
+    const visibleNodes = nodes.filter(node => isolatedNeighborhood.has(node.id));
+    const visibleNodeIds = new Set(visibleNodes.map(n => n.id));
+    const visibleLinks = links.filter(link => 
+      visibleNodeIds.has((link.source as ForceNode).id) && 
+      visibleNodeIds.has((link.target as ForceNode).id)
+    );
+    
+    return { visibleNodes, visibleLinks };
+  }, [nodes, links, isolatedNeighborhood]);
+
+  // Draw edges on canvas
+  const drawEdges = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    
+    visibleLinks.forEach(link => {
+      const source = link.source as ForceNode;
+      const target = link.target as ForceNode;
+      
+      if (!source.x || !source.y || !target.x || !target.y) return;
+      
+      const opacity = Math.max(0.1, Math.min(1, (link.weight || 1) * 0.5));
+      
+      context.beginPath();
+      context.moveTo(source.x, source.y);
+      context.lineTo(target.x, target.y);
+      context.strokeStyle = `rgba(100, 100, 100, ${opacity})`;
+      context.lineWidth = Math.max(0.5, Math.min(3, (link.weight || 1) * 2));
+      context.stroke();
+    });
+  }, [visibleLinks]);
+
+  // Handle canvas resize
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+    
+    const resizeCanvas = () => {
+      const rect = container.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+      canvas.style.width = `${rect.width}px`;
+      canvas.style.height = `${rect.height}px`;
+      drawEdges();
+    };
+    
+    resizeCanvas();
+    
+    const resizeObserver = new ResizeObserver(resizeCanvas);
+    resizeObserver.observe(container);
+    
+    return () => resizeObserver.disconnect();
+  }, [drawEdges]);
+
+  // Handle node interactions
+  const handleNodeHover = (node: GraphNode | null, event?: MouseEvent) => {
+    setHoveredNode(node);
+    const cb = onNodeHoverRef.current;
+    if (cb) cb(node);
+    if (node && event) {
+      setTooltip({
+        x: event.clientX + 10,
+        y: event.clientY - 10,
+        content: `${node.label || node.id}\nLayer: ${node.layer}\nMembers: ${node.members?.length || 0}`
+      });
+    } else {
+      setTooltip(null);
+    }
+  };
+
+  const handleNodeClick = (node: GraphNode, event: MouseEvent) => {
+    event.stopPropagation();
+    if (event.ctrlKey || event.metaKey) {
+      const iso = onNeighborhoodIsolateRef.current;
+      if (iso) iso(node, neighborsNRef.current);
+    } else {
+      setClickedNode(node);
+      const cb = onNodeClickRef.current;
+      if (cb) cb(node);
+    }
+  };
 
   // Initialize force simulation
-  useEffect(() => {
-    if (!svgRef.current || !visibleNodes.length) return
-
-    setupCanvas()
-
-    const svg = d3.select(svgRef.current)
-    svg.selectAll('*').remove()
-
-    const rect = containerRef.current!.getBoundingClientRect()
-    const width = rect.width - CLUSTER_CONFIG.margin.left - CLUSTER_CONFIG.margin.right
-    const height = rect.height - CLUSTER_CONFIG.margin.top - CLUSTER_CONFIG.margin.bottom
-
-    svg.attr('width', rect.width).attr('height', rect.height)
-
-    const g = svg.append('g')
-      .attr('transform', `translate(${CLUSTER_CONFIG.margin.left},${CLUSTER_CONFIG.margin.top})`)
-
-    // Create force nodes
-    const forceNodes: ForceNode[] = visibleNodes.map(node => ({
-      ...node,
-      x: node.x || Math.random() * width,
-      y: node.y || Math.random() * height,
-      fx: pinnedNodes.has(node.id) ? node.x : null,
-      fy: pinnedNodes.has(node.id) ? node.y : null
-    }))
-
-    // Create force simulation
-    const simulation = d3.forceSimulation(forceNodes)
-      .force('link', d3.forceLink(visibleLinks).id((d: any) => d.id).strength(0.1))
-      .force('charge', d3.forceManyBody().strength(-300))
-      .force('collide', d3.forceCollide((d: any) => getNodeRadius(d) + 10))
-      .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('container', forceContainer([[0, 0], [width, height]]))
-
-    simulationRef.current = simulation
-
-    // Create node groups
-    const nodeGroups = g.selectAll('.node-group')
-      .data(forceNodes)
-      .join('g')
-      .attr('class', 'node-group')
-      .style('cursor', 'pointer')
-
-    // Main supernode circles
-    nodeGroups.append('circle')
-      .attr('class', 'main-node')
-      .attr('r', d => getNodeRadius(d))
-      .attr('fill', d => d.nodeColor || '#6b7280')
-      .attr('stroke', d => pinnedNodes.has(d.id) ? '#fbbf24' : (darkMode ? '#374151' : '#ffffff'))
-      .attr('stroke-width', d => pinnedNodes.has(d.id) ? 3 : 2)
-      .attr('opacity', 0.8)
-
-    // Member count indicators
-    nodeGroups.append('text')
-      .attr('class', 'member-count')
-      .attr('text-anchor', 'middle')
-      .attr('dominant-baseline', 'middle')
-      .attr('font-size', '10px')
-      .attr('font-weight', 'bold')
-      .attr('fill', 'white')
-      .text(d => d.members?.length || 0)
-
-    // Labels
-    if (showLabels) {
-      nodeGroups.append('text')
-        .attr('class', 'node-label')
-        .attr('x', 0)
-        .attr('y', d => getNodeRadius(d) + 15)
-        .attr('text-anchor', 'middle')
-        .attr('font-size', '11px')
-        .attr('fill', darkMode ? '#e5e7eb' : '#374151')
-        .text(d => d.label.length > 12 ? d.label.substring(0, 12) + '...' : d.label)
+  const initializeSimulation = useCallback(() => {
+    if (!svgRef.current || !containerRef.current) {
+      return null;
     }
 
-    // Interaction handlers
-    nodeGroups
-      .on('mouseenter', (event, d) => {
-        setHoveredNode(d)
-        onNodeHover?.(d)
-        
-        const rect = containerRef.current!.getBoundingClientRect()
-        setTooltip({
-          x: event.clientX - rect.left + 10,
-          y: event.clientY - rect.top - 10,
-          content: makeSupernodeTooltip(d)
-        })
-      })
-      .on('mouseleave', () => {
-        setHoveredNode(null)
-        onNodeHover?.(null)
-        setTooltip(null)
-      })
-      .on('click', (event, d) => {
-        event.stopPropagation()
-        setClickedNode(d)
-        onNodeClick?.(d)
-      })
-      .on('dblclick', (event, d) => {
-        event.stopPropagation()
-        toggleExpansion(d.id)
-      })
-      .on('contextmenu', (event, d) => {
-        event.preventDefault()
-        togglePin(d.id)
-      })
+    if (!visibleNodes.length) {
+      return null;
+    }
 
-    // Drag behavior
+    const svg = d3.select(svgRef.current);
+    const container = containerRef.current;
+    const rect = container.getBoundingClientRect();
+    const width = rect.width;
+    const height = rect.height;
+
+    // Assign deterministic initial positions for nodes with no cached pos
+    (visibleNodes as ForceNode[]).forEach((n) => {
+      if (n.x == null || n.y == null) {
+        const base = `${n.id}:${(n as any).layer ?? 0}`;
+        const a = hashToUnit(base) * Math.PI * 2;
+        const rUnit = hashToUnit(base + '|r');
+        const radius = Math.max(40, Math.min(width, height) * (0.25 + 0.35 * rUnit));
+        n.x = width / 2 + Math.cos(a) * radius;
+        n.y = height / 2 + Math.sin(a) * radius;
+      }
+    });
+
+    // Create or reuse simulation
+    let simulation = simulationRef.current;
+    if (!simulation) {
+      simulation = d3.forceSimulation<ForceNode>(visibleNodes as ForceNode[])
+        .force('link', d3.forceLink<ForceNode, ForceLink>(visibleLinks)
+          .id(d => d.id)
+          .distance(100)
+          .strength(0.1)
+        )
+        .force('charge', d3.forceManyBody().strength(-300))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collision', d3.forceCollide().radius((d: any) => Math.sqrt(d.size || 10) * 3 + 5))
+        .alphaDecay(0.02)
+        .velocityDecay(0.3);
+      simulationRef.current = simulation;
+    }
+
+    // Update nodes/links without tearing down DOM
+    const dataJoin = svg.selectAll<SVGGElement, ForceNode>('.node-group')
+      .data(visibleNodes as ForceNode[], d => d.id);
+
+    const entered = dataJoin.enter()
+      .append('g')
+      .attr('class', 'node-group')
+      .style('cursor', 'pointer');
+
+    entered.append('circle')
+      .attr('r', d => Math.sqrt(d.size || 10) * 3)
+      .attr('fill', d => d.nodeColor || '#69b3a2')
+      .attr('stroke', '#333')
+      .attr('stroke-width', 1)
+      .attr('opacity', 1);
+
+    entered.append('text')
+      .text(d => d.label || d.id)
+      .attr('text-anchor', 'middle')
+      .attr('dy', d => Math.sqrt(d.size || 10) * 3 + 15)
+      .attr('font-size', '12px')
+      .attr('fill', darkMode ? '#fff' : '#333')
+      .attr('opacity', 1)
+      .style('display', showLabels ? '' : 'none');
+
+    const nodeGroups = entered.merge(dataJoin as any);
+
+    nodeGroups
+      .on('mouseover', (event, d) => handleNodeHover(d, event))
+      .on('mouseout', () => handleNodeHover(null))
+      .on('click', (event, d) => handleNodeClick(d, event));
+
     const drag = d3.drag<SVGGElement, ForceNode>()
       .on('start', (event, d) => {
-        if (!event.active) simulation.alphaTarget(0.3).restart()
-        d.fx = d.x
-        d.fy = d.y
+        if (!event.active && simulation) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
       })
       .on('drag', (event, d) => {
-        d.fx = event.x
-        d.fy = event.y
+        d.fx = event.x;
+        d.fy = event.y;
       })
       .on('end', (event, d) => {
-        if (!event.active) simulation.alphaTarget(0)
-        if (!pinnedNodes.has(d.id)) {
-          d.fx = null
-          d.fy = null
+        if (!event.active && simulation) simulation.alphaTarget(0);
+        if (!pinnedNodesRef.current.has(d.id)) {
+          d.fx = null;
+          d.fy = null;
         }
-      })
+      });
 
-    nodeGroups.call(drag)
+    nodeGroups.call(drag);
 
-    // Update positions on tick
+    // Save selection for tick updates
+    nodeSelectionRef.current = nodeGroups as any;
+
+    // Update simulation with latest data
+    simulation.nodes(visibleNodes as ForceNode[]);
+    const linkForce: any = simulation.force('link');
+    if (linkForce) linkForce.links(visibleLinks as any);
+
+    // Attach/upsert tick to use latest selection and edges
     simulation.on('tick', () => {
-      nodeGroups.attr('transform', d => {
-        d.pos = [d.x || 0, d.y || 0]
-        return `translate(${d.x},${d.y})`
-      })
-      drawEdges()
-    })
+      const sel = nodeSelectionRef.current;
+      if (sel) {
+        sel.attr('transform', d => `translate(${d.x || 0},${d.y || 0})`);
+        sel.each((d: any) => {
+          positionCacheRef.current.set(d.id, { x: d.x || 0, y: d.y || 0 });
+        });
+      }
+      if (tickCountRef.current % 5 === 0) {
+        drawEdges();
+      }
+      tickCountRef.current += 1;
+    });
 
-    return () => {
-      simulation.stop()
+    // Immediately reflect current positions without running forces
+    nodeGroups.attr('transform', d => `translate(${d.x || 0},${d.y || 0})`);
+    drawEdges();
+
+    // Freeze to avoid jitter on data updates; user interactions will nudge it
+    simulation.alpha(0);
+    simulation.stop();
+
+    return simulation;
+  }, [visibleNodes, visibleLinks, drawEdges]);
+
+  useEffect(() => {
+    const simulation = initializeSimulation();
+    if (simulation) {
+      simulationRef.current = simulation;
     }
-  }, [visibleNodes, visibleLinks, pinnedNodes, showLabels, darkMode, setupCanvas, drawEdges, toggleExpansion, togglePin, onNodeHover, onNodeClick])
+  }, [initializeSimulation])
 
-  // Clear isolation
+  // Update node styles reactively without re-initializing the simulation
+  useEffect(() => {
+    if (!svgRef.current) return;
+    const svg = d3.select(svgRef.current);
+    const nodeGroups = svg.selectAll<SVGGElement, ForceNode>('.node-group');
+
+    nodeGroups.select('circle')
+      .attr('stroke', (d: any) => {
+        if (selectedNodes.includes(d.id)) return '#ff6b6b';
+        if (pinnedNodes.has(d.id)) return '#ffd93d';
+        if (highlightedPath?.includes(d.id)) return '#4ecdc4';
+        return '#333';
+      })
+      .attr('stroke-width', (d: any) => (
+        selectedNodes.includes(d.id) || pinnedNodes.has(d.id) || highlightedPath?.includes(d.id) ? 3 : 1
+      ))
+      .attr('opacity', (d: any) => (hoveredNode && hoveredNode.id !== d.id ? 0.3 : 1));
+
+    nodeGroups.select('text')
+      .attr('fill', darkMode ? '#fff' : '#333')
+      .attr('opacity', (d: any) => (hoveredNode && hoveredNode.id !== d.id ? 0.3 : 1))
+      .style('display', showLabels ? '' : 'none');
+
+    // Optional: redraw edges to reflect any visual changes
+    drawEdges();
+  }, [hoveredNode, selectedNodes, pinnedNodes, highlightedPath, showLabels, darkMode, drawEdges]);
+
+  // Pause simulation while reconstructing to prevent jitter
+  useEffect(() => {
+    const sim = simulationRef.current;
+    if (!sim) return;
+    if (isReconstructing) {
+      sim.stop();
+    }
+  }, [isReconstructing]);
+
   const clearIsolation = useCallback(() => {
-    setIsolatedNeighborhood(new Set())
-  }, [])
+    if (setIsolatedNeighborhood) {
+      setIsolatedNeighborhood(new Set());
+    }
+  }, [setIsolatedNeighborhood])
+
+  if (!data?.nodes?.length) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center p-8">
+          <div className="text-4xl mb-4">📊</div>
+          <h3 className="text-lg font-medium mb-2">No data available</h3>
+          <p className="text-gray-500">
+            The graph data is empty or failed to load.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div ref={containerRef} className="relative w-full h-full">
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0"
-        style={{ zIndex: 1 }}
-      />
-      <svg
-        ref={svgRef}
-        className="absolute inset-0"
-        style={{ zIndex: 2 }}
-      />
-
-      {/* Controls */}
-      <div className={`absolute top-4 left-4 p-3 rounded-lg text-xs z-10 ${
-        darkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'
-      } shadow-lg border ${darkMode ? 'border-gray-600' : 'border-gray-200'}`}>
-        <div className="font-semibold mb-2">Supernode Clusters</div>
-        <div className="space-y-1 text-xs">
-          <div>• Double-click: Expand/collapse</div>
-          <div>• Right-click: Pin/unpin</div>
-          <div>• Ctrl+click: Isolate {neighborsN}-hop neighborhood</div>
-        </div>
+    <div ref={containerRef} className="relative w-full h-full bg-white dark:bg-gray-900 flex">
+      <div className={`relative ${clickedNode ? 'w-2/3' : 'w-full'} h-full transition-all duration-300`}>
         {isolatedNeighborhood.size > 0 && (
-          <button
-            onClick={clearIsolation}
-            className="mt-2 px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
-          >
-            Clear Isolation
-          </button>
+          <div className="absolute top-4 right-4 bg-blue-100 border border-blue-400 text-blue-700 px-4 py-3 rounded z-10">
+            <div className="flex items-center justify-between">
+              <span>Showing neighborhood ({isolatedNeighborhood.size} nodes)</span>
+              <button
+                onClick={clearIsolation}
+                className="ml-2 text-blue-700 hover:text-blue-900 font-bold"
+              >
+                ×
+              </button>
+            </div>
+          </div>
         )}
+
+        {tooltip && (
+          <div
+            className="absolute bg-gray-800 text-white text-xs rounded px-2 py-1 pointer-events-none z-10"
+            style={{
+              left: tooltip.x,
+              top: tooltip.y,
+              maxWidth: '200px'
+            }}
+          >
+            {tooltip.content}
+          </div>
+        )}
+
+        <svg
+          ref={svgRef}
+          className="absolute inset-0 w-full h-full"
+          style={{ zIndex: 1 }}
+        />
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0 w-full h-full pointer-events-none"
+          style={{ zIndex: 0 }}
+        />
       </div>
 
-      {tooltip && (
-        <div
-          className={`absolute text-xs p-3 rounded-lg shadow-lg pointer-events-none z-20 max-w-xs ${
-            darkMode 
-              ? 'bg-gray-800 text-white border border-gray-600' 
-              : 'bg-white text-gray-900 border border-gray-200'
-          }`}
-          style={{ left: tooltip.x, top: tooltip.y }}
-          dangerouslySetInnerHTML={{ __html: tooltip.content }}
-        />
+      {clickedNode && (
+        <div className="w-1/3 h-full bg-gray-50 dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 overflow-y-auto">
+          <div className="p-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                Supernode Details
+              </h3>
+              <button
+                onClick={() => setClickedNode(null)}
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mb-4 p-3 bg-white dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600">
+              <div className="text-sm font-semibold text-gray-900 dark:text-white mb-2">
+                {clickedNode.label}
+              </div>
+              <div className="text-xs text-gray-600 dark:text-gray-300 space-y-1">
+                <div>Layer: {clickedNode.layer}</div>
+                <div>Size: {clickedNode.size}</div>
+                <div>Member Count: {clickedNode.members?.length || 0}</div>
+              </div>
+            </div>
+
+            <h4 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">
+              Member Nodes ({clickedNode.members?.length || 0})
+            </h4>
+            <div className="space-y-2">
+              {clickedNode.members?.map((memberId, index) => (
+                <div
+                  key={`member-${memberId}`}
+                  className="p-2 bg-white dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600"
+                >
+                  <div className="text-sm font-mono text-gray-900 dark:text-white">
+                    {memberId}
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">
+                    Member #{index + 1}
+                  </div>
+                </div>
+              )) || (
+                <div className="text-sm text-gray-500 dark:text-gray-400 italic">
+                  No members found
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
-  )
+  );
 }
 
-function getNodeRadius(node: GraphNode): number {
-  const size = node.size || 1
-  return Math.max(
-    CLUSTER_CONFIG.nodeMinRadius,
-    Math.min(CLUSTER_CONFIG.nodeMaxRadius, Math.sqrt(size) * 3)
-  )
-}
-
-function getLayerColor(layer: number): string {
-  const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6']
-  return colors[layer % colors.length]
-}
-
-function getWeightColor(weight: number): string {
-  const absWeight = Math.abs(weight)
-  if (weight > 0) {
-    return `rgba(34, 197, 94, ${Math.min(absWeight, 1)})`
-  } else {
-    return `rgba(239, 68, 68, ${Math.min(absWeight, 1)})`
-  }
-}
-
-function makeSupernodeTooltip(node: GraphNode): string {
-  const parts = [
-    `<strong>${node.label}</strong>`,
-    `Layer: ${node.layer}`,
-    `Size: ${node.size}`,
-    `Members: ${node.members?.length || 0}`,
-    node.members?.length ? `<div class="mt-1 text-xs text-gray-500">Members: ${node.members.slice(0, 5).join(', ')}${node.members.length > 5 ? '...' : ''}</div>` : null
-  ].filter(Boolean)
-  
-  return parts.join('<br>')
-}
+export default SupernodeClusterView;

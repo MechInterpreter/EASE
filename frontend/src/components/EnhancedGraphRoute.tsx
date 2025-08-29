@@ -1,5 +1,5 @@
 // Enhanced Graph Route - Comprehensive visualization with all features
-import React, { useState, useCallback, useEffect } from 'react'
+import React, { useState, useCallback, useEffect, ErrorInfo, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import AttributionRailView from './AttributionRailView'
 import SupernodeClusterView from './SupernodeClusterView'
@@ -14,6 +14,7 @@ import type { NeuronpediaJSON } from '../lib/neuronpedia-parser'
 import { parseNeuronpediaJSON } from '../lib/neuronpedia-parser'
 import { labelResolver } from '../services/labels/labelResolver'
 import type { LabelMode } from '../services/labels/autoInterp'
+import { SupernodeService, type ReconstructionConfig } from '../services/supernodes'
 
 // Sample data for testing (will be replaced with actual charlotte data)
 const charlotteData = {
@@ -50,9 +51,47 @@ const charlotteData = {
 
 type ViewMode = 'attribution' | 'supernode'
 
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('ErrorBoundary caught an error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-4 bg-red-50 text-red-800 rounded-lg">
+          <h2 className="font-bold text-lg mb-2">Something went wrong</h2>
+          <p>{this.state.error?.message}</p>
+          <pre className="mt-2 p-2 bg-black/10 rounded text-xs overflow-auto">
+            {this.state.error?.stack}
+          </pre>
+          <button 
+            onClick={() => this.setState({ hasError: false, error: null })}
+            className="mt-2 px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 export default function EnhancedGraphRoute() {
   // View state
   const [viewMode, setViewMode] = useState<ViewMode>('attribution')
+  const [initializationError, setInitializationError] = useState<string | null>(null)
   const [darkMode, setDarkMode] = useState(false)
   
   // Visualization controls
@@ -75,6 +114,15 @@ export default function EnhancedGraphRoute() {
   // Analysis state
   const [analysisResults, setAnalysisResults] = useState<any>(null)
   const [isRunning, setIsRunning] = useState(false)
+  const ANALYSIS_TIMEOUT_MS = 120000
+  
+  // Supernode state
+  const [supernodeData, setSupernodeData] = useState<any>(null)
+  const [supernodeConfig, setSupernodeConfig] = useState<ReconstructionConfig | null>(null)
+  const [isLoadingSupernodes, setIsLoadingSupernodes] = useState(false)
+  const [charlotteData, setCharlotteData] = useState<any>(null)
+  // Guard against infinite auto-retries on failure
+  const hasAttemptedSupernodesRef = useRef(false)
   
   // Timeline state
   const [currentStep, setCurrentStep] = useState(0)
@@ -91,8 +139,37 @@ export default function EnhancedGraphRoute() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [labelOverrides, setLabelOverrides] = useState<Record<string, string>>({})
 
+  // Load Charlotte data and supernode config on mount
+  useEffect(() => {
+    const loadInitialData = async () => {
+      try {
+        console.log('Loading initial data...')
+        const [data, config] = await Promise.all([
+          SupernodeService.getCharlotteData(),
+          SupernodeService.getCharlottePresetConfig()
+        ])
+        console.log('Data loaded:', { data: data ? 'success' : 'empty', config: config ? 'success' : 'empty' })
+        setCharlotteData(data)
+        setSupernodeConfig(config)
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred'
+        console.error('Failed to load initial data:', error)
+        
+        // Check if it's a network connectivity issue
+        if (errorMsg.includes('fetch') || errorMsg.includes('NetworkError') || errorMsg.includes('Failed to fetch')) {
+          setInitializationError(`Backend server connection failed. Please ensure the backend is running on localhost:8000. Error: ${errorMsg}`)
+          setErrorMessage('Backend server not reachable - check if it\'s running on port 8000')
+        } else {
+          setInitializationError(`Failed to load initial data: ${errorMsg}`)
+          setErrorMessage('Failed to load initial data')
+        }
+      }
+    }
+    loadInitialData()
+  }, [])
+
   // Parse data using neuronpedia parser
-  const parsedData = parseNeuronpediaJSON(charlotteData as NeuronpediaJSON)
+  const parsedData = charlotteData ? parseNeuronpediaJSON(charlotteData as NeuronpediaJSON) : { nodes: [], edges: [] }
   
   // Create proper GraphNode format from parsed data
   // Preserve fields like featureId, ctx_idx, clerp/ppClerp for label resolution and search
@@ -105,43 +182,114 @@ export default function EnhancedGraphRoute() {
     labelResolver.preloadTopNodeLabels(graphNodes, labelMode, 20)
   }, [graphNodes, labelMode])
 
+  // Load supernodes once when switching to supernode view
+  useEffect(() => {
+    if (
+      viewMode === 'supernode' &&
+      charlotteData &&
+      supernodeConfig &&
+      !supernodeData &&
+      !isLoadingSupernodes &&
+      !hasAttemptedSupernodesRef.current
+    ) {
+      hasAttemptedSupernodesRef.current = true
+      loadSupernodes()
+    }
+  }, [viewMode, charlotteData, supernodeConfig, supernodeData, isLoadingSupernodes])
+
+  // Allow retry if user toggles away and back to supernode view
+  useEffect(() => {
+    if (viewMode !== 'supernode') {
+      hasAttemptedSupernodesRef.current = false
+    }
+  }, [viewMode])
+
+  const loadSupernodes = async () => {
+    if (!charlotteData || !supernodeConfig) {
+      console.warn('[EnhancedGraphRoute] loadSupernodes: Missing data', { charlotteData: !!charlotteData, supernodeConfig: !!supernodeConfig })
+      return
+    }
+    
+    setIsLoadingSupernodes(true)
+    setErrorMessage(null)
+    
+    try {
+      const start = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+      console.log('[EnhancedGraphRoute] loadSupernodes → reconstructCharlotteSupernodes', {
+        config: supernodeConfig,
+        apiBase: (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) ? 'http://localhost:8000' : 'relative'
+      })
+
+      const result = await SupernodeService.reconstructCharlotteSupernodes(supernodeConfig, ANALYSIS_TIMEOUT_MS)
+      const elapsed = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - start
+      console.log('[EnhancedGraphRoute] loadSupernodes ← result', { stats: result?.stats, elapsedMs: Math.round(elapsed) })
+
+      const convertedData = SupernodeService.convertToSupernodeData(result)
+      console.log('[EnhancedGraphRoute] supernodeData set', {
+        nodeCount: convertedData.nodes?.length || 0,
+        edgeCount: convertedData.edges?.length || 0,
+      })
+      setSupernodeData(convertedData)
+      const merges = Array.isArray(result?.merge_log) ? result.merge_log.length : (typeof result?.stats?.candidates_passed_gate === 'number' ? result.stats.candidates_passed_gate : 0)
+      setSuccessMessage(`Merged ${merges} pairs • ${result.stats.num_supernodes} supernodes • CR ${result.stats.compression_ratio.toFixed(2)}`)
+    } catch (error) {
+      console.error('Failed to reconstruct supernodes:', error)
+      const msg = (error instanceof Error ? error.message : String(error))
+      
+      // Provide more specific error messages
+      if (msg.includes('timed out')) {
+        setErrorMessage('Supernode generation timed out - the dataset may be too large')
+      } else if (msg.includes('fetch') || msg.includes('NetworkError') || msg.includes('Failed to fetch')) {
+        setErrorMessage('Backend connection failed - ensure server is running on port 8000')
+      } else if (msg.includes('500')) {
+        setErrorMessage('Backend processing error - check server logs for details')
+      } else {
+        setErrorMessage(`Failed to generate supernodes: ${msg}`)
+      }
+    } finally {
+      setIsLoadingSupernodes(false)
+    }
+  }
+
+  // Safety net: ensure loading state cannot persist indefinitely
+  useEffect(() => {
+    if (!isLoadingSupernodes) return
+    const safety = setTimeout(() => {
+      console.warn('[EnhancedGraphRoute] Safety timeout: supernode loading still in progress, resetting flag')
+      setIsLoadingSupernodes(false)
+      setErrorMessage((prev: string | null) => prev || 'Supernode generation timed out')
+    }, ANALYSIS_TIMEOUT_MS + 5000)
+    return () => clearTimeout(safety)
+  }, [isLoadingSupernodes])
+
   // Generate meaningful groups from sample data showing actual feature concepts
   const groups = React.useMemo(() => {
-    // Group by semantic similarity (in real app, this would come from clustering algorithm)
-    const semanticGroups = [
-      {
-        id: 'financial_analysis',
-        name: 'Financial Analysis',
-        members: graphNodes.filter(node => 
-          node.clerp?.toLowerCase().includes('money') || 
-          node.clerp?.toLowerCase().includes('analysis')
-        )
-      },
-      {
-        id: 'metadata_processing', 
-        name: 'Metadata Processing',
-        members: graphNodes.filter(node => 
-          node.clerp?.toLowerCase().includes('metadata') ||
-          node.clerp?.toLowerCase().includes('associative')
-        )
-      },
-      {
-        id: 'attention_mechanisms',
-        name: 'Attention Mechanisms', 
-        members: graphNodes.filter(node => 
-          node.feature_type === 'attention' ||
-          node.clerp?.toLowerCase().includes('attention')
-        )
-      },
-      {
-        id: 'output_logits',
-        name: 'Output Generation',
-        members: graphNodes.filter(node => 
-          node.feature_type === 'logit' ||
-          node.clerp?.toLowerCase().includes('output')
-        )
+    // Use real supernodes if available, otherwise fall back to heuristic grouping
+    if (supernodeData?.nodes) {
+      return supernodeData.nodes.map((supernode: any) => ({
+        id: supernode.id,
+        name: `Supernode ${supernode.id} (${supernode.size} members)`,
+        members: supernode.members,
+        size: supernode.size,
+        layer: supernode.layer
+      }))
+    }
+
+    // Fallback: Group by layer or other meaningful attributes
+    const layerGroups = new Map<number, GraphNode[]>();
+    graphNodes.forEach(node => {
+      const layer = node.layer || 0;
+      if (!layerGroups.has(layer)) {
+        layerGroups.set(layer, []);
       }
-    ].filter(group => group.members.length > 0)
+      layerGroups.get(layer)!.push(node);
+    });
+
+    const semanticGroups = Array.from(layerGroups.entries()).map(([layer, nodes]) => ({
+      id: `layer_${layer}`,
+      name: `Layer ${layer} Nodes`,
+      members: nodes
+    })).filter(group => group.members.length > 1) // Only show layers with multiple nodes
     
     // Add remaining ungrouped nodes as individual groups
     const groupedNodeIds = new Set(semanticGroups.flatMap(g => g.members.map(m => m.id)))
@@ -163,34 +311,79 @@ export default function EnhancedGraphRoute() {
     }))
   }, [graphNodes])
 
-  // Sample supernode data for cluster view
-  const supernodeData = {
-    nodes: groups.map(group => ({
+  // Legacy supernode data for cluster view (fallback when real supernodes not available)
+  const legacySupernodeData = React.useMemo(() => ({
+    nodes: groups.map((group: any) => ({
       id: group.id,
       size: group.size,
       layer: group.members[0]?.layer || 0,
-      members: group.members.map(m => m.id)
+      members: group.members.map((m: any) => m.id)
     })),
     edges: [
       { source: groups[0]?.id || 'financial_analysis', target: groups[2]?.id || 'attention_mechanisms', weight: 0.7 },
       { source: groups[1]?.id || 'metadata_processing', target: groups[2]?.id || 'attention_mechanisms', weight: 0.4 },
       { source: groups[2]?.id || 'attention_mechanisms', target: groups[3]?.id || 'output_logits', weight: 0.8 }
     ].filter(edge => edge.source && edge.target)
-  }
+  }), [groups])
 
-  // Analysis handlers
+  // Analysis handlers - trigger backend supernode reconstruction
   const handleRunAnalysis = useCallback(async (params: AnalysisParams) => {
+    if (!charlotteData) {
+      setErrorMessage('No attribution data loaded yet')
+      return
+    }
+
     setIsRunning(true)
     try {
-      // Simulate analysis API call
-      await new Promise(resolve => setTimeout(resolve, 2000))
-      setAnalysisResults({ status: 'completed', params } as any)
+      const startedAt = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+      console.log('[EnhancedGraphRoute] Run Analysis → start', {
+        params,
+        nodes: Array.isArray(charlotteData?.nodes) ? charlotteData.nodes.length : 0,
+        edges: Array.isArray(charlotteData?.edges) ? charlotteData.edges.length : 0,
+      })
+      setAnalysisResults({ status: 'running', params } as any)
+      const cfg: Partial<ReconstructionConfig> = {
+        tau_sim: params.tau_sim,
+        alpha: params.alpha,
+        beta: params.beta,
+        intra_layer_only: false
+      }
+
+      const result = await SupernodeService.reconstructCharlotteSupernodes(cfg, ANALYSIS_TIMEOUT_MS)
+      const elapsed = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt
+      console.log('[EnhancedGraphRoute] Run Analysis ← result', { stats: result?.stats, elapsedMs: Math.round(elapsed) })
+
+      const converted = SupernodeService.convertToSupernodeData(result)
+      console.log('[EnhancedGraphRoute] supernodeData set (analysis)', {
+        nodeCount: converted.nodes?.length || 0,
+        edgeCount: converted.edges?.length || 0,
+      })
+      setSupernodeData(converted)
+      setAnalysisResults({ status: 'completed', params, stats: result.stats } as any)
+      const merges = Array.isArray(result?.merge_log) ? result.merge_log.length : (typeof result?.stats?.candidates_passed_gate === 'number' ? result.stats.candidates_passed_gate : 0)
+      setSuccessMessage(`Merged ${merges} pairs • ${result.stats.num_supernodes} supernodes • CR ${result.stats.compression_ratio.toFixed(2)}`)
     } catch (error) {
-      console.error('Analysis failed:', error)
+      console.error('Supernode reconstruction failed:', error)
+      const msg = (error instanceof Error ? error.message : String(error))
+      setAnalysisResults({ status: 'failed', params, error: msg } as any)
+      setErrorMessage(msg.includes('timed out') ? 'Supernode reconstruction timed out' : 'Supernode reconstruction failed')
     } finally {
       setIsRunning(false)
+      console.log('[EnhancedGraphRoute] Run Analysis → finished')
     }
-  }, [])
+  }, [charlotteData])
+
+  // Safety net: ensure running state cannot persist indefinitely
+  useEffect(() => {
+    if (!isRunning) return
+    const safety = setTimeout(() => {
+      console.warn('[EnhancedGraphRoute] Safety timeout: analysis still running, forcing reset')
+      setIsRunning(false)
+      setAnalysisResults((prev: any) => prev && prev.status === 'running' ? { ...prev, status: 'failed', error: 'Client-side safety timeout' } : prev)
+      setErrorMessage((prev: string | null) => prev || 'Analysis timed out')
+    }, ANALYSIS_TIMEOUT_MS + 5000)
+    return () => clearTimeout(safety)
+  }, [isRunning])
 
   const handleResetAnalysis = useCallback(() => {
     setAnalysisResults(null)
@@ -275,12 +468,9 @@ export default function EnhancedGraphRoute() {
   // Handle label mode change
   const handleLabelModeChange = useCallback((mode: LabelMode) => {
     setLabelMode(mode)
-    // Preload labels for top nodes when switching to autointerp mode
-    if (mode === 'autointerp' && graphNodes.length > 0) {
-      // Batch resolve labels for top nodes
-      graphNodes.slice(0, 50).forEach(node => {
-        labelResolver.resolveLabel(node, { mode, useCache: true }).catch(console.error)
-      })
+    // Preload labels for top nodes when switching modes
+    if (graphNodes.length > 0) {
+      labelResolver.preloadTopNodeLabels(graphNodes, mode, 50).catch(console.error)
     }
   }, [graphNodes])
 
@@ -297,8 +487,28 @@ export default function EnhancedGraphRoute() {
     }
   }, [darkMode])
 
+  // Show initialization error if any
+  if (initializationError) {
+    return (
+      <div className="p-8 bg-red-50 text-red-800">
+        <h1 className="text-2xl font-bold mb-4">Initialization Error</h1>
+        <p className="mb-4">{initializationError}</p>
+        <p className="text-sm text-red-700 mb-4">
+          Please check the browser console for more details and ensure the backend server is running.
+        </p>
+        <button 
+          onClick={() => window.location.reload()}
+          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+        >
+          Reload Page
+        </button>
+      </div>
+    )
+  }
+
   return (
-    <div className={`flex h-screen ${darkMode ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
+    <ErrorBoundary>
+      <div className={`flex h-screen ${darkMode ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
       {/* Left Sidebar - Controls */}
       <div className={`w-80 border-r overflow-y-auto ${
         darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'
@@ -377,7 +587,7 @@ export default function EnhancedGraphRoute() {
           {/* Interactive Controls */}
           <InteractiveControls
             nodes={graphNodes}
-            edges={parsedData.links.map(link => ({
+            edges={('links' in parsedData ? parsedData.links : parsedData.edges || []).map((link: any) => ({
               source: typeof link.source === 'string' ? link.source : link.source.id,
               target: typeof link.target === 'string' ? link.target : link.target.id,
               weight: link.weight || 0
@@ -394,9 +604,9 @@ export default function EnhancedGraphRoute() {
             }}
             onGroupClick={(groupId) => {
               console.log('Group clicked:', groupId)
-              const group = groups.find(g => g.id === groupId)
+              const group = groups.find((g: any) => g.id === groupId)
               if (group) {
-                setSelectedNodes(group.members.map(m => m.id))
+                setSelectedNodes(group.members.map((m: any) => m.id))
                 setSuccessMessage(`Selected ${group.members.length} features from "${group.name}" group`)
               }
             }}
@@ -417,13 +627,8 @@ export default function EnhancedGraphRoute() {
               setSuccessMessage('Labels exported successfully')
             }}
             onImportLabels={(labels) => {
-              const nodeLabels = Object.fromEntries(
-                Object.entries(labels).map(([key, value]) => [
-                  key,
-                  { text: value, source: 'imported' as const, confidence: 1.0 }
-                ])
-              )
-              labelResolver.importLabels(nodeLabels)
+              // labels is already Record<string, string>
+              labelResolver.importLabels(labels)
               setSuccessMessage('Labels imported successfully')
             }}
             onLabelModeChange={setLabelMode}
@@ -447,8 +652,8 @@ export default function EnhancedGraphRoute() {
                 pinnedNodes,
                 selectedNodes,
                 analysisParams: analysisResults?.params,
-                nodes: charlotteData.nodes,
-                links: charlotteData.edges
+                nodes: charlotteData?.nodes || [],
+                links: charlotteData?.edges || []
               }}
               darkMode={darkMode}
               onError={handleError}
@@ -517,6 +722,41 @@ export default function EnhancedGraphRoute() {
           </p>
         </div>
 
+        {/* Loading and Error States */}
+        {initializationError && (
+          <div className="mx-4 mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+            <div className="flex items-start">
+              <div className="flex-shrink-0">
+                <svg className="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                </svg>
+              </div>
+              <div className="ml-3">
+                <h3 className="text-sm font-medium text-red-800">Initialization Error</h3>
+                <p className="mt-1 text-sm text-red-700">{initializationError}</p>
+                <button 
+                  onClick={() => window.location.reload()}
+                  className="mt-2 px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700"
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isLoadingSupernodes && viewMode === 'supernode' && (
+          <div className="mx-4 mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+              <div className="ml-3">
+                <h3 className="text-sm font-medium text-blue-800">Loading Supernodes</h3>
+                <p className="text-sm text-blue-700">Processing Charlotte dataset and reconstructing supernodes...</p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Visualization */}
         <div className="flex-1 relative">
           {viewMode === 'attribution' ? (
@@ -531,15 +771,42 @@ export default function EnhancedGraphRoute() {
               darkMode={darkMode}
             />
           ) : (
-            <SupernodeClusterView
-              data={supernodeData}
-              onNodeHover={(node: any) => setHoveredNode(node?.id || null)}
-              onNodeClick={(node: any) => setClickedNode(node?.id || null)}
-              onNeighborhoodIsolate={handleNeighborhoodIsolate}
-              edgeOpacityThreshold={edgeOpacityThreshold}
-              showLabels={showLabels}
-              darkMode={darkMode}
-            />
+            <div className="relative h-full">
+              <SupernodeClusterView
+                data={supernodeData || legacySupernodeData}
+                layout={layout}
+                edgeOpacityThreshold={edgeOpacityThreshold}
+                showLabels={showLabels}
+                neighborsN={neighborsN}
+                isReconstructing={isLoadingSupernodes}
+                onNodeHover={(node: any) => setHoveredNode(node?.id || null)}
+                onNodeClick={(node: any) => setClickedNode(node?.id || null)}
+                onNodeDoubleClick={(nodeId: any) => {
+                  console.log('Node double-clicked:', nodeId)
+                  setSuccessMessage(`Expanded/collapsed node: ${nodeId}`)
+                }}
+                onEdgeClick={(source: any, target: any) => {
+                  console.log('Edge clicked:', source, '->', target)
+                  setHighlightedPath([source, target])
+                  setSuccessMessage(`Highlighted connection: ${source} → ${target}`)
+                }}
+                selectedNodes={selectedNodes}
+                pinnedNodes={pinnedNodes}
+                highlightedPath={highlightedPath}
+                isolatedNodes={isolatedNodes}
+                darkMode={darkMode}
+              />
+
+              {isLoadingSupernodes && (
+                <div className="absolute inset-0 bg-white/70 dark:bg-black/60 backdrop-blur-sm flex items-center justify-center z-20">
+                  <div className="text-center">
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                    <p className="text-gray-700 dark:text-gray-200">Reconstructing supernodes...</p>
+                    <p className="text-sm text-gray-500 mt-1">This may take up to 60 seconds</p>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
 
@@ -577,7 +844,11 @@ export default function EnhancedGraphRoute() {
       <div className="hidden">
         <PerformanceOptimizer
           nodes={graphNodes}
-          links={parsedData.links}
+          links={(('links' in (parsedData as any) ? (parsedData as any).links : (parsedData as any).edges) || []).map((link: any) => ({
+            source: typeof link.source === 'string' ? link.source : link.source.id,
+            target: typeof link.target === 'string' ? link.target : link.target.id,
+            weight: link.weight || 0
+          }))}
           topK={topKEdges}
           enableWebGL={enableWebGL}
           onRenderComplete={(stats) => {
@@ -603,6 +874,7 @@ export default function EnhancedGraphRoute() {
           darkMode={darkMode}
         />
       )}
-    </div>
+      </div>
+    </ErrorBoundary>
   )
 }

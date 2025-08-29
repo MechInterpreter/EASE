@@ -98,6 +98,10 @@ def run_pipeline(graph: Graph, req: RunRequest) -> RunState:
         if len(idxs) < 2:
             continue
         Xl = X[idxs, :]
+        # Skip degenerate layers with no fingerprint dimensions or all-zero rows
+        # This prevents merges being driven by lack of information (e.g., no logits/tokens)
+        if Xl.shape[1] == 0 or not np.any(np.linalg.norm(Xl, axis=1) > 0):
+            continue
         S = _similarity_matrix(Xl, req.similarity_metric)
         # Zero diagonal to avoid self-pairs (although selector uses i<j)
         np.fill_diagonal(S, -np.inf)

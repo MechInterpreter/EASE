@@ -176,8 +176,8 @@ def build_fingerprints(
     # adjacency-based fingerprints over logit ids
     logit_index: Dict[str, int] = {lid: j for j, lid in enumerate(graph.logit_ids)}
     D = len(logit_index)
-    if D == 0:
-        # If there are no logits, fallback to tokens as columns
+    # If there are too few logits (e.g., 0 or 1), fallback to tokens as columns
+    if D < 2:
         token_index: Dict[str, int] = {tid: j for j, tid in enumerate(graph.token_ids)}
         D = len(token_index)
         col_index = token_index

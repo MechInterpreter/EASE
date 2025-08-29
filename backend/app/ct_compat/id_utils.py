@@ -12,9 +12,15 @@ from ..models import Node, Edge
 
 def _infer_node_type(raw: Dict[str, Any]) -> Optional[str]:
     # Prefer explicit flags first
-    if bool(raw.get("is_target_logit")):
+    if _is_true(raw.get("is_target_logit")):
         return "logit"
-    t = raw.get("type") or raw.get("node_type") or raw.get("kind")
+    t = (
+        raw.get("type")
+        or raw.get("node_type")
+        or raw.get("kind")
+        or raw.get("feature_type")
+        or raw.get("featureType")
+    )
     if t:
         t = str(t).lower()
         if t in {"feature", "token", "logit"}:
@@ -25,6 +31,24 @@ def _infer_node_type(raw: Dict[str, Any]) -> Optional[str]:
         if key in rid:
             return key
     return None
+
+
+def _is_true(val: Any) -> bool:
+    """Return True for truthy representations commonly seen in JSON exports.
+
+    Handles booleans, numeric 0/1, and strings like "true"/"false" (case-insensitive).
+    """
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        try:
+            return float(val) != 0.0
+        except Exception:
+            return False
+    if isinstance(val, str):
+        s = val.strip().lower()
+        return s in {"true", "1", "yes", "y", "t"}
+    return False
 
 
 def _to_int(value: Any) -> Optional[int]:

@@ -4,6 +4,8 @@ import d3 from '../lib/d3-jetpack'
 import type { GraphNode, GraphLink } from '../lib/graph-types'
 import type { NeuronpediaJSON, TokenLane, LayerGroup } from '../lib/neuronpedia-parser'
 import { parseNeuronpediaJSON, generateAutoInterpLabel } from '../lib/neuronpedia-parser'
+import { labelResolver } from '../services/labels/labelResolver'
+import type { LabelMode } from '../services/labels/autoInterp'
 
 interface AttributionRailViewProps {
   data: NeuronpediaJSON
@@ -12,6 +14,7 @@ interface AttributionRailViewProps {
   onPathHighlight?: (path: GraphNode[]) => void
   edgeOpacityThreshold?: number
   showLabels?: boolean
+  labelMode?: LabelMode
   darkMode?: boolean
 }
 
@@ -31,6 +34,7 @@ export default function AttributionRailView({
   onPathHighlight,
   edgeOpacityThreshold = 0.1,
   showLabels = true,
+  labelMode = 'autointerp',
   darkMode = false
 }: AttributionRailViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -223,7 +227,7 @@ export default function AttributionRailView({
         .attr('font-size', '10px')
         .attr('fill', darkMode ? '#e5e7eb' : '#374151')
         .text(d => {
-          const label = d.ppClerp || d.clerp || generateAutoInterpLabel(d)
+          const label = labelResolver.getDisplayLabel(d, labelMode)
           return label.length > 15 ? label.substring(0, 15) + '...' : label
         })
     }
@@ -243,7 +247,7 @@ export default function AttributionRailView({
         setTooltip({
           x: event.clientX - rect.left + 10,
           y: event.clientY - rect.top - 10,
-          content: makeTooltipContent(d)
+          content: makeTooltipContent(d, labelMode)
         })
       })
       .on('mouseleave', () => {
@@ -260,7 +264,7 @@ export default function AttributionRailView({
       })
 
     drawEdges()
-  }, [nodes, layerGroups, tokenLanes, width, height, showLabels, darkMode, setupCanvas, drawEdges, findPath, onNodeHover, onNodeClick, onPathHighlight, clickedNode])
+  }, [nodes, layerGroups, tokenLanes, width, height, showLabels, darkMode, labelMode, setupCanvas, drawEdges, findPath, onNodeHover, onNodeClick, onPathHighlight, clickedNode])
 
   // Redraw edges when highlight changes
   useEffect(() => {
@@ -326,9 +330,11 @@ export default function AttributionRailView({
   )
 }
 
-function makeTooltipContent(node: GraphNode): string {
+function makeTooltipContent(node: GraphNode, labelMode: LabelMode = 'autointerp'): string {
+  const displayLabel = labelResolver.getDisplayLabel(node, labelMode)
   const parts = [
-    `<strong>${node.ppClerp || node.clerp || node.label}</strong>`,
+    `<strong>${displayLabel}</strong>`,
+    `ID: ${node.id}`,
     `Layer: ${node.layer}`,
     `Feature: ${node.featureId}`,
     `Type: ${node.feature_type}`,

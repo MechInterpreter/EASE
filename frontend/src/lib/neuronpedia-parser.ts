@@ -53,7 +53,13 @@ export interface NeuronpediaJSON {
     influence: number
     activation: number
   }>
-  edges: Array<{
+  // Edges may appear as 'edges' or 'links' depending on producer
+  edges?: Array<{
+    source: string
+    target: string
+    weight: number
+  }>
+  links?: Array<{
     source: string
     target: string
     weight: number
@@ -72,15 +78,29 @@ export interface LayerGroup {
   yPosition: number
 }
 
-export function parseNeuronpediaJSON(data: NeuronpediaJSON): {
+export function parseNeuronpediaJSON(data: NeuronpediaJSON | null | undefined): {
   nodes: GraphNode[]
   links: GraphLink[]
   tokenLanes: TokenLane[]
   layerGroups: LayerGroup[]
-  metadata: NeuronpediaJSON['metadata']
+  metadata: NeuronpediaJSON['metadata'] | null
 } {
+  // Handle null/undefined data
+  const graphAny = (data as any)?.graph || null
+  const rawNodes = (data as any)?.nodes || graphAny?.nodes || []
+  if (!data || !Array.isArray(rawNodes)) {
+    console.warn('parseNeuronpediaJSON: Invalid or missing data', { data: !!data, nodes: !!data?.nodes })
+    return {
+      nodes: [],
+      links: [],
+      tokenLanes: [],
+      layerGroups: [],
+      metadata: null
+    }
+  }
+
   // Parse nodes with enhanced labeling
-  const nodes: GraphNode[] = data.nodes.map((node, i) => {
+  const nodes: GraphNode[] = rawNodes.map((node: any, i: number) => {
     const layer = parseInt(node.layer) || 0
     const isLogit = node.is_target_logit || node.feature_type === 'logit'
     
@@ -114,8 +134,9 @@ export function parseNeuronpediaJSON(data: NeuronpediaJSON): {
 
   const nodeMap = new Map(nodes.map(n => [n.id, n]))
 
-  // Parse edges
-  const links: GraphLink[] = data.edges.map(edge => {
+  // Parse edges with null check
+  const rawEdges = (data as any)?.edges || (data as any)?.links || graphAny?.edges || graphAny?.links || []
+  const links: GraphLink[] = (rawEdges as any[]).map((edge: any) => {
     const sourceNode = nodeMap.get(edge.source)
     const targetNode = nodeMap.get(edge.target)
     
@@ -143,8 +164,9 @@ export function parseNeuronpediaJSON(data: NeuronpediaJSON): {
     return link
   }).filter(Boolean) as GraphLink[]
 
-  // Create token lanes
-  const tokenLanes: TokenLane[] = data.metadata.prompt_tokens.map((token, i) => ({
+  // Create token lanes with null checks
+  const promptTokens = data.metadata?.prompt_tokens || []
+  const tokenLanes: TokenLane[] = promptTokens.map((token, i) => ({
     token,
     position: i,
     nodes: nodes.filter(n => n.ctx_idx === i)

@@ -1,5 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import type { Snapshot } from '../types'
+import type { Snapshot, SnapshotNode } from '../types'
+import type { GraphNode } from '../lib/graph-types'
+import { labelResolver } from '../services/labels/labelResolver'
+import type { LabelMode } from '../services/labels/autoInterp'
 
 type VizNode = { id: string; x: number; y: number; r: number; layer: number; type: 'super' | 'logit' }
 type VizEdge = { source: string; target: string; w: number }
@@ -8,6 +11,18 @@ type ViewRange = { minX: number; minY: number; maxX: number; maxY: number }
 const ZOOM_BUTTON_FACTOR = 0.32 // similar to Neuronpedia
 const PAD_X_FRAC = 0.04
 const PAD_Y_FRAC = 0.10
+
+// Convert SnapshotNode to GraphNode for label resolution
+function snapshotNodeToGraphNode(node: SnapshotNode): GraphNode {
+  return {
+    id: node.id,
+    label: node.id, // Default label is the ID
+    layer: node.layer || 0,
+    size: node.size,
+    members: node.members,
+    feature_type: 'supernode'
+  }
+}
 
 function GraphCanvas({ snap }: { snap: Snapshot }) {
   const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
@@ -361,7 +376,12 @@ function GraphCanvas({ snap }: { snap: Snapshot }) {
   )
 }
 
-export default function GraphView({ snap }: { snap: Snapshot | null }) {
+interface GraphViewProps {
+  snap: Snapshot
+  labelMode?: LabelMode
+}
+
+export default function GraphView({ snap, labelMode = 'autointerp' }: GraphViewProps) {
   if (!snap) {
     return <div className="p-4 text-neutral-500">Run to see the graph snapshot.</div>
   }
@@ -373,13 +393,27 @@ export default function GraphView({ snap }: { snap: Snapshot | null }) {
         <div>
           <div className="font-semibold mb-2">Groups</div>
           <div className="space-y-1 max-h-[40vh] overflow-auto">
-            {snap.nodes.slice(0, 200).map(n => (
-              <div key={n.id} className="border rounded p-2 text-sm">
-                <div className="flex justify-between"><span>{n.id}</span><span className="text-xs">L{n.layer}</span></div>
-                <div className="text-xs text-neutral-500">size {n.size}</div>
-                <div className="text-xs line-clamp-2">{n.members.slice(0, 5).join(', ')}{n.members.length > 5 ? '…' : ''}</div>
-              </div>
-            ))}
+            {snap.nodes.slice(0, 200).map(n => {
+              // Convert to GraphNode for label resolution
+              const graphNode = snapshotNodeToGraphNode(n)
+              const displayLabel = labelResolver.getDisplayLabel(graphNode, labelMode)
+              
+              return (
+                <div key={n.id} className="border rounded p-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="font-medium truncate" title={displayLabel}>
+                      {displayLabel.length > 20 ? displayLabel.substring(0, 20) + '...' : displayLabel}
+                    </span>
+                    <span className="text-xs flex-shrink-0 ml-2">L{n.layer}</span>
+                  </div>
+                  <div className="text-xs text-neutral-500">size {n.size}</div>
+                  <div className="text-xs text-neutral-400 line-clamp-2" title={n.members.slice(0, 5).join(', ')}>
+                    {n.members.slice(0, 3).join(', ')}{n.members.length > 3 ? ` +${n.members.length - 3} more` : ''}
+                  </div>
+                  <div className="text-xs text-neutral-400 mt-1">ID: {n.id}</div>
+                </div>
+              )
+            })}
           </div>
         </div>
         <div>
@@ -389,12 +423,32 @@ export default function GraphView({ snap }: { snap: Snapshot | null }) {
               .slice()
               .sort((a,b)=>Math.abs(b.weight)-Math.abs(a.weight))
               .slice(0, 200)
-              .map((e, i) => (
-              <div key={i} className="border rounded p-2 text-sm">
-                <div>{e.source} → {e.target}</div>
-                <div className="text-xs text-neutral-500">w={e.weight.toFixed(3)}</div>
-              </div>
-            ))}
+              .map((e, i) => {
+                // Get labels for source and target nodes
+                const sourceNode = snap.nodes.find(n => n.id === e.source)
+                const targetNode = snap.nodes.find(n => n.id === e.target)
+                
+                const sourceLabel = sourceNode ? 
+                  labelResolver.getDisplayLabel(snapshotNodeToGraphNode(sourceNode), labelMode) : e.source
+                const targetLabel = targetNode ? 
+                  labelResolver.getDisplayLabel(snapshotNodeToGraphNode(targetNode), labelMode) : e.target
+                
+                return (
+                  <div key={i} className="border rounded p-2 text-sm">
+                    <div className="font-medium">
+                      <span className="truncate" title={sourceLabel}>
+                        {sourceLabel.length > 15 ? sourceLabel.substring(0, 15) + '...' : sourceLabel}
+                      </span>
+                      <span className="mx-2">→</span>
+                      <span className="truncate" title={targetLabel}>
+                        {targetLabel.length > 15 ? targetLabel.substring(0, 15) + '...' : targetLabel}
+                      </span>
+                    </div>
+                    <div className="text-xs text-neutral-500">w={e.weight.toFixed(3)}</div>
+                    <div className="text-xs text-neutral-400">{e.source} → {e.target}</div>
+                  </div>
+                )
+              })}
           </div>
         </div>
       </div>

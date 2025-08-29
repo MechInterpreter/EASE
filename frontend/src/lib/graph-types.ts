@@ -1,6 +1,6 @@
 // Types for graph visualizations adapted from Neuronpedia and EASE
 
-export interface GraphNode {
+export interface GraphNode extends d3.SimulationNodeDatum {
   id: string
   featureId?: string
   nodeId?: string
@@ -11,6 +11,8 @@ export interface GraphNode {
   size?: number
   x?: number
   y?: number
+  vx?: number
+  vy?: number
   fx?: number | null
   fy?: number | null
   pos?: [number, number]
@@ -43,24 +45,44 @@ export interface GraphNode {
   isTargetLogit?: boolean
   runIdx?: number
   reverseCtxIdx?: number
+  // Force-directed layout
+  radius?: number
+  color?: string
+  type?: 'supernode' | 'logit'
+  expanded?: boolean
 }
 
-export interface GraphLink {
+export interface GraphLink extends d3.SimulationLinkDatum<GraphNode> {
   source: string | GraphNode
   target: string | GraphNode
+  weight: number
+  value?: number
+  id?: string
+  type?: string
+  sourcePort?: string
+  targetPort?: string
+  tmpHovered?: boolean
+  tmpClicked?: boolean
+  tmpFaded?: boolean
+  tmpHighlighted?: boolean
+  tmpSelected?: boolean
+  tmpHidden?: boolean
+  tmpDimmed?: boolean
+  tmpSourceHighlighted?: boolean
+  tmpTargetHighlighted?: boolean
+  // Force-directed layout
+  index?: number
+  width?: number
+  color?: string
+  opacity?: number
+  strokeDasharray?: string
+  // Neuronpedia-specific fields
   sourceNode?: GraphNode
   targetNode?: GraphNode
-  weight: number
   absWeight?: number
-  color?: string
   pctInput?: number
   pctInputColor?: string
   strokeWidth?: number
-  tmpColor?: string
-  tmpHoveredCtxOffset?: number
-  tmpClickedCtxOffset?: number
-  sourceOffsetX?: number
-  targetOffsetX?: number
 }
 
 export interface NeuronpediaNode {
@@ -118,6 +140,13 @@ export interface GraphConfig {
 export interface ForceNode extends GraphNode {
   vx?: number
   vy?: number
+  radius: number
+  color: string
+  type: 'supernode' | 'logit'
+  expanded: boolean
+  pos: [number, number]
+  fx?: number | null
+  fy?: number | null
 }
 
-export type VisualizationType = 'attribution' | 'supernode'
+export type VisualizationType = 'attribution' | 'supernode' | 'force'

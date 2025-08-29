@@ -21,9 +21,9 @@ export interface AnalysisParams {
 }
 
 const DEFAULT_PARAMS: AnalysisParams = {
-  tau_sim: 0.8,
-  alpha: 0.1,
-  beta: 0.9,
+  tau_sim: 0.98,  // Minimum cosine similarity for candidate merge
+  alpha: 0.9,     // Minimum mean correlation
+  beta: 0.05,     // Maximum cross-entropy gap
   gating: 0.5,
   seed: 42,
   layerWhitelist: [],
@@ -77,31 +77,14 @@ export default function AnalysisControls({
       <div className="space-y-3">
         <div>
           <label className="block text-xs font-medium mb-1">
-            τ_sim (Similarity Threshold)
+            α (Min Mean Correlation)
+            <span className="ml-1 text-gray-500 font-normal" title="Minimum mean correlation required for merging">?</span>
           </label>
           <div className="flex items-center space-x-2">
             <input
               type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={params.tau_sim}
-              onChange={(e) => updateParam('tau_sim', parseFloat(e.target.value))}
-              className="flex-1"
-            />
-            <span className="text-xs w-12 text-right">{params.tau_sim.toFixed(2)}</span>
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-xs font-medium mb-1">
-            α (Learning Rate)
-          </label>
-          <div className="flex items-center space-x-2">
-            <input
-              type="range"
-              min="0.01"
-              max="1"
+              min="0.5"
+              max="1.0"
               step="0.01"
               value={params.alpha}
               onChange={(e) => updateParam('alpha', parseFloat(e.target.value))}
@@ -113,14 +96,15 @@ export default function AnalysisControls({
 
         <div>
           <label className="block text-xs font-medium mb-1">
-            β (Momentum)
+            β (Max Cross-Entropy Gap)
+            <span className="ml-1 text-gray-500 font-normal" title="Maximum cross-entropy gap admitted by the fidelity gate">?</span>
           </label>
           <div className="flex items-center space-x-2">
             <input
               type="range"
               min="0"
-              max="1"
-              step="0.01"
+              max="0.2"
+              step="0.005"
               value={params.beta}
               onChange={(e) => updateParam('beta', parseFloat(e.target.value))}
               className="flex-1"
@@ -264,9 +248,9 @@ export default function AnalysisControls({
         darkMode ? 'text-gray-400' : 'text-gray-600'
       }`}>
         <div className="font-medium">Parameter Guide:</div>
-        <div>• τ_sim: Higher values merge more similar nodes</div>
-        <div>• α: Learning rate for gradient descent</div>
-        <div>• β: Momentum for optimization stability</div>
+        <div>• τ_sim: Minimum cosine similarity for candidate merge</div>
+        <div>• α: Minimum mean correlation between nodes</div>
+        <div>• β: Maximum cross-entropy gap for fidelity gate</div>
         <div>• Gating: Threshold for edge pruning</div>
         <div>• Seed: Reproducible random initialization</div>
         <div>• Whitelist: Only analyze specified layers</div>

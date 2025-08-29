@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, PlainTextResponse
 import httpx
+import logging
 
 from .config import config
 from .loader import load_graph, set_graph_from_raw, validate_raw
@@ -22,8 +23,12 @@ from .schemas import (
     LoadUrlRequest,
     GraphValidation,
 )
+from .api.supernodes import router as supernodes_router
 
 app = FastAPI(title="EASE Backend", version="0.1.0")
+
+# Include routers
+app.include_router(supernodes_router)
 
 # CORS
 app.add_middleware(
@@ -34,6 +39,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Configure logging to surface INFO-level messages from EASE modules.
+# This helps expose step timing from `app.services.supernode_reconstruction`.
+logger = logging.getLogger("app")
+if logger.level == logging.NOTSET:
+    logger.setLevel(logging.INFO)
+logging.getLogger("app.api.supernodes").setLevel(logging.INFO)
+logging.getLogger("app.services.supernode_reconstruction").setLevel(logging.INFO)
+# If no handlers are configured (e.g., when not run via uvicorn), attach a basic one.
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO)
 
 @app.get("/api/graph/info", response_model=GraphInfo)
 def api_graph_info(graph: str | None = Query(default=None, description="Optional URL to load a graph before returning info")) -> GraphInfo:
