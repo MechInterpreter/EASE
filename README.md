@@ -2,6 +2,17 @@
 
 This repo contains a FastAPI backend and a React (Vite) frontend for automated supernode reconstruction with fidelity-gated similarity merges and live visualization.
 
+## UI Overview
+
+### Main Page
+![Main Page](images/main.png)
+
+### Attribution Graph
+![Attribution Graph](images/attribution.png)
+
+### Supernode Clusters
+![Supernode Clusters](images/supernode.png)
+
 ## Prerequisites
 - Python 3.11+
 - Node.js 18+ and npm
