@@ -883,6 +883,8 @@ export default function EnhancedGraphRoute() {
                 neighborsN={neighborsN}
                 isReconstructing={isLoadingSupernodes || isBuildingUltranode}
                 isUltranodeView={useUltranode && !!ultranodeData}
+                allNodes={graphNodes}
+                labelMode={labelMode}
                 onNodeHover={(node: any) => setHoveredNode(node?.id || null)}
                 onNodeClick={(node: any) => setClickedNode(node?.id || null)}
                 onNodeDoubleClick={(nodeId: any) => {

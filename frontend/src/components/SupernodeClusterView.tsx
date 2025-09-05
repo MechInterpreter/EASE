@@ -3,6 +3,8 @@ import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react'
 import * as d3 from 'd3'
 import { Selection, BaseType, SimulationNodeDatum, SimulationLinkDatum } from 'd3'
 import type { GraphNode, GraphLink } from '../lib/graph-types'
+import { labelResolver } from '../services/labels/labelResolver'
+import type { LabelMode } from '../services/labels/autoInterp'
 
 type SupernodeData = GraphNode & {
   members?: GraphNode[]
@@ -61,6 +63,8 @@ interface SupernodeClusterViewProps {
   setIsolatedNeighborhood?: (nodes: Set<string>) => void
   isReconstructing?: boolean
   isUltranodeView?: boolean
+  allNodes?: GraphNode[]
+  labelMode?: LabelMode
 }
 
 function SupernodeClusterView({
@@ -81,7 +85,9 @@ function SupernodeClusterView({
   isolatedNodes,
   setIsolatedNeighborhood,
   isReconstructing = false,
-  isUltranodeView = false
+  isUltranodeView = false,
+  allNodes = [],
+  labelMode = 'autointerp'
 }: SupernodeClusterViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
@@ -101,6 +107,17 @@ function SupernodeClusterView({
   const [pinnedNodes, setPinnedNodes] = useState<Set<string>>(new Set())
   const [isolatedNeighborhood, setIsolatedNeighborhoodState] = useState<Set<string>>(new Set())
   const [tooltip, setTooltip] = useState<{ x: number; y: number; content: string } | null>(null)
+
+  // Build quick index for label lookup by ID
+  const nodeIndex = useMemo(() => {
+    const m = new Map<string, GraphNode>()
+    ;(allNodes || []).forEach((n: any) => {
+      if (n && typeof (n as any).id === 'string') {
+        m.set((n as any).id, n as GraphNode)
+      }
+    })
+    return m
+  }, [allNodes])
 
   // Sync external pinnedNodes prop to internal state
   useEffect(() => {
@@ -522,9 +539,7 @@ function SupernodeClusterView({
         <div className="w-1/3 h-full bg-gray-50 dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 overflow-y-auto">
           <div className="p-4">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                Supernode Details
-              </h3>
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Supernode Details</h3>
               <button
                 onClick={() => setClickedNode(null)}
                 className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
@@ -534,9 +549,7 @@ function SupernodeClusterView({
             </div>
 
             <div className="mb-4 p-3 bg-white dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600">
-              <div className="text-sm font-semibold text-gray-900 dark:text-white mb-2">
-                {clickedNode.label}
-              </div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-white mb-2">{clickedNode.label}</div>
               <div className="text-xs text-gray-600 dark:text-gray-300 space-y-1">
                 <div>Layer: {clickedNode.layer}</div>
                 <div>Size: {clickedNode.size}</div>
@@ -548,22 +561,24 @@ function SupernodeClusterView({
               Member Nodes ({clickedNode.members?.length || 0})
             </h4>
             <div className="space-y-2">
-              {clickedNode.members?.map((memberId, index) => (
-                <div
-                  key={`member-${memberId}`}
-                  className="p-2 bg-white dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600"
-                >
-                  <div className="text-sm font-mono text-gray-900 dark:text-white">
-                    {memberId}
+              {clickedNode.members?.map((memberId, index) => {
+                const id = String(memberId)
+                const n = nodeIndex.get(id)
+                const label = n ? labelResolver.getDisplayLabel(n, labelMode) : null
+                return (
+                  <div
+                    key={`member-${id}`}
+                    className="p-2 bg-white dark:bg-gray-700 rounded border border-gray-200 dark:border-gray-600"
+                  >
+                    <div className="text-sm text-gray-900 dark:text-white">
+                      <span className="font-mono">{id}</span>
+                      {label && <span className="ml-2 opacity-80">— {label}</span>}
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">Member #{index + 1}</div>
                   </div>
-                  <div className="text-xs text-gray-500 dark:text-gray-400">
-                    Member #{index + 1}
-                  </div>
-                </div>
-              )) || (
-                <div className="text-sm text-gray-500 dark:text-gray-400 italic">
-                  No members found
-                </div>
+                )
+              }) || (
+                <div className="text-sm text-gray-500 dark:text-gray-400 italic">No members found</div>
               )}
             </div>
           </div>
