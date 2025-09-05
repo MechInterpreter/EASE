@@ -13,6 +13,9 @@ This repo contains a FastAPI backend and a React (Vite) frontend for automated s
 ### Supernode Clusters
 ![Supernode Clusters](images/supernode.png)
 
+### Ultranode Graph
+![Ultranode Graph](images/ultranode.png)
+
 ## Prerequisites
 - Python 3.11+
 - Node.js 18+ and npm
