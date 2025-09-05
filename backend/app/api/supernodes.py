@@ -133,3 +133,51 @@ async def get_charlotte_preset_config():
         "intra_layer_only": False,
         "description": "Charlotte tuned preset thresholds",
     }
+
+# ---------------------------
+# Target-conditioned ultranode
+# ---------------------------
+
+class UltranodeRequest(BaseModel):
+    attribution_graph: Dict[str, Any]
+    target_logit_id: str
+    # Single config dict holds both reconstruction and ultranode parameters
+    config: Optional[Dict[str, Any]] = None
+
+
+@router.post("/ultranode")
+async def build_ultranode_endpoint(req: UltranodeRequest):
+    """Build a target-conditioned ultranode subgraph.
+
+    Request config can contain both ReconstructionConfig fields and ultranode-specific fields.
+    Reconstruction fields recognized: tau_sim, alpha, beta, intra_layer_only
+    All other keys are forwarded to the UltranodeConfig in the service.
+    """
+    try:
+        cfg = req.config or {}
+
+        # Parse reconstruction config (fall back to dataclass defaults)
+        defaults = ReconstructionConfig()
+        recon_cfg = ReconstructionConfig(
+            tau_sim=float(cfg.get('tau_sim', defaults.tau_sim)),
+            alpha=float(cfg.get('alpha', defaults.alpha)),
+            beta=float(cfg.get('beta', defaults.beta)),
+            intra_layer_only=bool(cfg.get('intra_layer_only', defaults.intra_layer_only)),
+        )
+
+        # Initialize reconstructor
+        reconstructor = SupernodeReconstructor(recon_cfg)
+
+        # Ultranode-specific params: pass entire config (service will filter)
+        ultranode_cfg = {k: v for k, v in cfg.items() if k not in {"tau_sim", "alpha", "beta", "intra_layer_only"}}
+
+        result = reconstructor.build_ultranode(
+            req.attribution_graph,
+            target_logit_id=req.target_logit_id,
+            cfg_dict=ultranode_cfg,
+        )
+
+        return result
+    except Exception as e:
+        logger.error(f"Error building ultranode: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ultranode build failed: {str(e)}")

@@ -124,6 +124,12 @@ export default function EnhancedGraphRoute() {
   // Guard against infinite auto-retries on failure
   const hasAttemptedSupernodesRef = useRef(false)
   
+  // Ultranode (target-conditioned) state
+  const [targetLogitId, setTargetLogitId] = useState<string>('')
+  const [ultranodeData, setUltranodeData] = useState<any>(null)
+  const [useUltranode, setUseUltranode] = useState<boolean>(false)
+  const [isBuildingUltranode, setIsBuildingUltranode] = useState(false)
+  
   // Timeline state
   const [currentStep, setCurrentStep] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
@@ -170,6 +176,13 @@ export default function EnhancedGraphRoute() {
 
   // Parse data using neuronpedia parser
   const parsedData = charlotteData ? parseNeuronpediaJSON(charlotteData as NeuronpediaJSON) : { nodes: [], edges: [] }
+  // Available logits in the dataset for target selection
+  const logitNodes = (parsedData.nodes || []).filter((n: any) => n.isTargetLogit || n.feature_type === 'logit')
+  useEffect(() => {
+    if (!targetLogitId && logitNodes.length > 0) {
+      setTargetLogitId(logitNodes[0].id)
+    }
+  }, [logitNodes, targetLogitId])
   
   // Create proper GraphNode format from parsed data
   // Preserve fields like featureId, ctx_idx, clerp/ppClerp for label resolution and search
@@ -584,6 +597,96 @@ export default function EnhancedGraphRoute() {
             onNeighborsChange={setNeighborsN}
           />
 
+          {/* Target Mode (Ultranode) */}
+          <div className={`${darkMode ? 'bg-gray-800 border border-gray-700' : 'bg-white border border-gray-200'} rounded-lg p-3`}>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold">Target Mode (Ultranode)</h3>
+              <label className="flex items-center text-xs">
+                <input type="checkbox" className="mr-2" checked={useUltranode} onChange={(e)=>setUseUltranode(e.target.checked)} />
+                Use Ultranode Subgraph
+              </label>
+            </div>
+            <div className="space-y-2">
+              <label className="block text-xs font-medium">Target Logit</label>
+              <select
+                value={targetLogitId}
+                onChange={(e)=>setTargetLogitId(e.target.value)}
+                className={`w-full text-sm rounded border px-2 py-1 ${darkMode ? 'bg-gray-700 border-gray-600 text-gray-100' : 'bg-white border-gray-300 text-gray-900'}`}
+              >
+                {logitNodes.map((n:any)=> (
+                  <option key={n.id} value={n.id}>{n.label || n.id}</option>
+                ))}
+              </select>
+              <button
+                onClick={async ()=>{
+                  if (!charlotteData || !targetLogitId) { setErrorMessage('No data or target selected'); return }
+                  setIsBuildingUltranode(true)
+                  setErrorMessage(null)
+                  try {
+                    const cfg:any = {
+                      prefilter_topk: 200,
+                      include_negative: false,
+                      max_nodes: 150,
+                      max_hops: 2,
+                      top_k_seeds: 25,
+                      top_k_per_hop: 10,
+                      alpha: 0.95,
+                      beta: 0.02,
+                      // Ensure cross-layer allowed even if defaults change later
+                      intra_layer_only: false,
+                    }
+                    const ultra = await SupernodeService.getUltranode(charlotteData, targetLogitId, cfg, ANALYSIS_TIMEOUT_MS)
+                    const converted = SupernodeService.convertUltranodeToSupernodeData(ultra)
+                    setUltranodeData(converted)
+                    // Auto-switch to supernode view and enable ultranode toggle so it's visible immediately
+                    setViewMode('supernode')
+                    setUseUltranode(true)
+                    setSuccessMessage(`Ultranode built • nodes ${ultra?.stats?.num_nodes ?? converted.nodes.length} • mass ${(ultra?.stats?.total_causal_mass ?? 0).toFixed(2)}`)
+                  } catch (err:any) {
+                    const msg = (err instanceof Error ? err.message : String(err))
+                    setErrorMessage(msg.includes('timed out') ? 'Ultranode build timed out' : `Ultranode build failed: ${msg}`)
+                  } finally {
+                    setIsBuildingUltranode(false)
+                  }
+                }}
+                disabled={isBuildingUltranode || logitNodes.length === 0}
+                className={`w-full mt-2 px-3 py-2 text-sm rounded ${darkMode ? 'bg-blue-600 hover:bg-blue-500 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'} disabled:opacity-50`}
+              >
+                {isBuildingUltranode ? 'Building…' : 'Build Ultranode'}
+              </button>
+              {(useUltranode && ultranodeData) && (
+                <div className={`mt-3 p-2 rounded ${darkMode ? 'bg-gray-700 border border-gray-600' : 'bg-gray-50 border border-gray-200'}`}>
+                  <div className="text-xs font-semibold mb-2">Ultranode Summary</div>
+                  <div className="text-xs mb-2 text-gray-600 dark:text-gray-300">Nodes: {ultranodeData.nodes?.length || 0} • Edges: {ultranodeData.edges?.length || 0}</div>
+                  <div className="max-h-48 overflow-auto space-y-2 pr-1">
+                    {(ultranodeData.nodes || []).map((n:any) => (
+                      <details key={n.id} className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded border ${darkMode ? 'border-gray-600' : 'border-gray-200'} p-2`}>
+                        <summary className="cursor-pointer select-none text-xs">
+                          <span className="font-mono">{n.id}</span>
+                          <span className="ml-2 opacity-75">L{n.layer ?? 0}</span>
+                          <span className="ml-2">size {Math.round(n.size || 1)}</span>
+                          <span className="ml-2">members {(n.members?.length ?? 0)}</span>
+                        </summary>
+                        {(n.members?.length ?? 0) > 0 ? (
+                          <ul className="mt-2 pl-4 list-disc text-[11px] space-y-1">
+                            {n.members.slice(0, 50).map((m:string, idx:number) => (
+                              <li key={`${n.id}-member-${idx}`} className="font-mono">{m}</li>
+                            ))}
+                            {n.members.length > 50 && (
+                              <li className="opacity-70">…and {n.members.length - 50} more</li>
+                            )}
+                          </ul>
+                        ) : (
+                          <div className="mt-2 text-[11px] opacity-70">No members reported</div>
+                        )}
+                      </details>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* Interactive Controls */}
           <InteractiveControls
             nodes={graphNodes}
@@ -773,19 +876,20 @@ export default function EnhancedGraphRoute() {
           ) : (
             <div className="relative h-full">
               <SupernodeClusterView
-                data={supernodeData || legacySupernodeData}
+                data={(useUltranode && ultranodeData) ? ultranodeData : (supernodeData || legacySupernodeData)}
                 layout={layout}
                 edgeOpacityThreshold={edgeOpacityThreshold}
                 showLabels={showLabels}
                 neighborsN={neighborsN}
-                isReconstructing={isLoadingSupernodes}
+                isReconstructing={isLoadingSupernodes || isBuildingUltranode}
+                isUltranodeView={useUltranode && !!ultranodeData}
                 onNodeHover={(node: any) => setHoveredNode(node?.id || null)}
                 onNodeClick={(node: any) => setClickedNode(node?.id || null)}
                 onNodeDoubleClick={(nodeId: any) => {
                   console.log('Node double-clicked:', nodeId)
                   setSuccessMessage(`Expanded/collapsed node: ${nodeId}`)
                 }}
-                onEdgeClick={(source: any, target: any) => {
+                onEdgeClick={(source, target) => {
                   console.log('Edge clicked:', source, '->', target)
                   setHighlightedPath([source, target])
                   setSuccessMessage(`Highlighted connection: ${source} → ${target}`)

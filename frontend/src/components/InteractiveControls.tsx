@@ -139,10 +139,10 @@ export default function InteractiveControls({
           const targetNode = nodes.find(n => n.id === edge.target)
           
           const sourceLabel = sourceNode 
-            ? labelResolver.getDisplayLabelWithId(sourceNode, labelMode)
+            ? labelResolver.getDisplayLabel(sourceNode, labelMode)
             : edge.source
           const targetLabel = targetNode 
-            ? labelResolver.getDisplayLabelWithId(targetNode, labelMode)
+            ? labelResolver.getDisplayLabel(targetNode, labelMode)
             : edge.target
           
           return {

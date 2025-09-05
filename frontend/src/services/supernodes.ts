@@ -258,4 +258,76 @@ export class SupernodeService {
 
     return { nodes, edges: normalized };
   }
+
+  // ---------------------------
+  // Ultranode (target-conditioned) API
+  // ---------------------------
+
+  static async getUltranode(
+    attributionGraph: any,
+    targetLogitId: string,
+    config: Record<string, any> = {},
+    timeoutMs: number = 120000
+  ): Promise<{
+    selected_logit_id: string;
+    nodes: Array<{ id: string; score: number; layer?: number | string; label?: string | null }>;
+    edges: Array<{ source: string; target: string; score: number; sign: 'pos' | 'neg' }>;
+    paths: string[][];
+    fidelity_after_selection: { mean_corr: number; ce_gap: number; alpha: number; beta: number };
+    stats: { total_causal_mass: number; captured_mass_pct: number; num_nodes: number; num_edges: number; compression: number };
+  }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const url = `${API_BASE}/api/supernodes/ultranode`;
+    console.log('[SupernodeService] getUltranode → POST', url, { targetLogitId, timeoutMs });
+    try {
+      const response = await withTimeout(fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ attribution_graph: attributionGraph, target_logit_id: targetLogitId, config }),
+        signal: controller.signal,
+      }), timeoutMs, () => controller.abort(), 'Ultranode request');
+      if (!response.ok) {
+        throw new Error(`Ultranode request failed: ${response.status} ${response.statusText}`);
+      }
+      return await withTimeout(response.json(), Math.max(5000, Math.floor(timeoutMs * 0.75)), () => controller.abort(), 'Parsing ultranode JSON');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  static convertUltranodeToSupernodeData(ultra: {
+    selected_logit_id?: string;
+    nodes: Array<{ id: string; score: number; layer?: number | string; members?: string[] }>;
+    edges: Array<{ source: string; target: string; score: number }>;
+  }): {
+    nodes: Array<{ id: string; size: number; layer?: number; members: string[] }>;
+    edges: Array<{ source: string; target: string; weight: number }>;
+  } {
+    const nodes = ultra.nodes.map(n => ({
+      id: n.id,
+      size: Math.max(1, Number.isFinite(n.score) ? n.score : 1),
+      layer: typeof n.layer === 'string' ? parseInt(n.layer as string) || 0 : (n.layer ?? 0),
+      members: Array.isArray((n as any).members) ? (n as any).members : [],
+    }));
+    const edges = ultra.edges.map(e => ({
+      source: e.source,
+      target: e.target,
+      weight: Number.isFinite(e.score) ? e.score : 0.0,
+    }));
+    // If backend included edges to the target logit but the node is absent, add a synthetic target node
+    if (ultra?.selected_logit_id && !nodes.find(n => n.id === ultra.selected_logit_id)) {
+      const maxLayer = nodes.reduce((m, n) => Math.max(m, n.layer || 0), 0);
+      const toTargetMass = ultra.edges
+        .filter(e => e.target === ultra.selected_logit_id)
+        .reduce((acc, e) => acc + (Number.isFinite(e.score) ? Math.abs(e.score) : 0), 0);
+      nodes.push({
+        id: ultra.selected_logit_id,
+        size: Math.max(1, toTargetMass || 1),
+        layer: maxLayer + 1,
+        members: [],
+      });
+    }
+    return { nodes, edges };
+  }
 }

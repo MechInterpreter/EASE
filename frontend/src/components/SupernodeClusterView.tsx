@@ -60,6 +60,7 @@ interface SupernodeClusterViewProps {
   isolatedNodes?: string[]
   setIsolatedNeighborhood?: (nodes: Set<string>) => void
   isReconstructing?: boolean
+  isUltranodeView?: boolean
 }
 
 function SupernodeClusterView({
@@ -79,7 +80,8 @@ function SupernodeClusterView({
   highlightedPath,
   isolatedNodes,
   setIsolatedNeighborhood,
-  isReconstructing = false
+  isReconstructing = false,
+  isUltranodeView = false
 }: SupernodeClusterViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
@@ -123,27 +125,32 @@ function SupernodeClusterView({
     }
   }, [isolatedNodes])
 
-  // Parse supernode data - only show actual supernodes (nodes with multiple members)
+  // Parse data
+  // If result contains multi-member supernodes, show only those (original behavior).
+  // If not (e.g., ultranode subgraph with atomic nodes), show all nodes.
   const nodes = React.useMemo(() => {
     if (!data?.nodes) return []
 
-    return data.nodes
-      .filter((sn: any) => sn.members && sn.members.length > 1)
-      .map((sn: any) => ({
-        id: sn.id,
-        label: sn.id,
-        layer: sn.layer || 0,
-        size: sn.size,
-        members: sn.members || [],
-        isSuperNode: true,
-        expanded: false,
-        pinned: false,
-        nodeColor: getLayerColor(sn.layer || 0),
-        sourceLinks: [],
-        targetLinks: [],
-        x: positionCacheRef.current.get(sn.id)?.x,
-        y: positionCacheRef.current.get(sn.id)?.y
-      })) as GraphNode[]
+    const hasMultiMember = data.nodes.some((sn: any) => Array.isArray(sn.members) && sn.members.length > 1)
+    const rows = hasMultiMember
+      ? data.nodes.filter((sn: any) => Array.isArray(sn.members) && sn.members.length > 1)
+      : data.nodes
+
+    return rows.map((sn: any) => ({
+      id: sn.id,
+      label: sn.id,
+      layer: sn.layer || 0,
+      size: sn.size || 1,
+      members: Array.isArray(sn.members) ? sn.members : [],
+      isSuperNode: Array.isArray(sn.members) && sn.members.length > 1,
+      expanded: false,
+      pinned: false,
+      nodeColor: getLayerColor(sn.layer || 0),
+      sourceLinks: [],
+      targetLinks: [],
+      x: positionCacheRef.current.get(sn.id)?.x,
+      y: positionCacheRef.current.get(sn.id)?.y
+    })) as GraphNode[]
   }, [data])
 
   // Convert links/edges to use node objects instead of IDs for D3 force layout
@@ -205,16 +212,24 @@ function SupernodeClusterView({
       
       if (!source.x || !source.y || !target.x || !target.y) return;
       
-      const opacity = Math.max(0.1, Math.min(1, (link.weight || 1) * 0.5));
-      
+      // Stronger visibility for ultranode edges
+      const baseRGB = isUltranodeView
+        ? (darkMode ? [240, 244, 255] : [31, 41, 55])
+        : [100, 100, 100];
+      const minOpacity = isUltranodeView ? 0.75 : 0.1;
+      const opacity = Math.max(minOpacity, Math.min(1, (Math.abs(link.weight || 1)) * (isUltranodeView ? 0.9 : 0.5)));
+      const lineWidth = isUltranodeView
+        ? Math.max(2, Math.min(6, 1.5 + Math.log(1 + Math.abs(link.weight || 1)) * 3))
+        : Math.max(0.5, Math.min(3, (Math.abs(link.weight || 1)) * 2));
+
       context.beginPath();
       context.moveTo(source.x, source.y);
       context.lineTo(target.x, target.y);
-      context.strokeStyle = `rgba(100, 100, 100, ${opacity})`;
-      context.lineWidth = Math.max(0.5, Math.min(3, (link.weight || 1) * 2));
+      context.strokeStyle = `rgba(${baseRGB[0]}, ${baseRGB[1]}, ${baseRGB[2]}, ${opacity})`;
+      context.lineWidth = lineWidth;
       context.stroke();
     });
-  }, [visibleLinks]);
+  }, [visibleLinks, darkMode, isUltranodeView]);
 
   // Handle canvas resize
   useEffect(() => {
