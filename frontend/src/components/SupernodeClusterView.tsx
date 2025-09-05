@@ -148,10 +148,12 @@ function SupernodeClusterView({
   const nodes = React.useMemo(() => {
     if (!data?.nodes) return []
 
+    // IMPORTANT: When viewing an ultranode subgraph, show ALL nodes (including single-member groups),
+    // otherwise edges that connect to singletons would disappear.
     const hasMultiMember = data.nodes.some((sn: any) => Array.isArray(sn.members) && sn.members.length > 1)
-    const rows = hasMultiMember
-      ? data.nodes.filter((sn: any) => Array.isArray(sn.members) && sn.members.length > 1)
-      : data.nodes
+    const rows = (isUltranodeView || !hasMultiMember)
+      ? data.nodes
+      : data.nodes.filter((sn: any) => Array.isArray(sn.members) && sn.members.length > 1)
 
     return rows.map((sn: any) => ({
       id: sn.id,
@@ -231,13 +233,15 @@ function SupernodeClusterView({
       
       // Stronger visibility for ultranode edges
       const baseRGB = isUltranodeView
-        ? (darkMode ? [240, 244, 255] : [31, 41, 55])
+        ? (darkMode ? [255, 255, 255] : [31, 41, 55])
         : [100, 100, 100];
-      const minOpacity = isUltranodeView ? 0.75 : 0.1;
-      const opacity = Math.max(minOpacity, Math.min(1, (Math.abs(link.weight || 1)) * (isUltranodeView ? 0.9 : 0.5)));
+      // Stronger defaults so every ultranode edge is clearly seen
+      const minOpacity = isUltranodeView ? 0.95 : 0.1;
+      const strength = Math.abs(link.weight || 1);
+      const opacity = Math.max(minOpacity, Math.min(1, strength * (isUltranodeView ? 1.0 : 0.5)));
       const lineWidth = isUltranodeView
-        ? Math.max(2, Math.min(6, 1.5 + Math.log(1 + Math.abs(link.weight || 1)) * 3))
-        : Math.max(0.5, Math.min(3, (Math.abs(link.weight || 1)) * 2));
+        ? Math.max(3, Math.min(7, 2.5 + Math.log(1 + strength) * 3.5))
+        : Math.max(0.5, Math.min(3, strength * 2));
 
       context.beginPath();
       context.moveTo(source.x, source.y);
